@@ -51,6 +51,13 @@
         "before": "553a1294",
         "after": "24d10594"
       }
+    ],
+    "variants": [
+      {
+        "name": "FilzaSlop 1.0.2 base (same Mach-O UUID and ARM64 patch preimages)",
+        "sha256_before": "b12dc5231fb410963cfdffd277abb327abfccbae3f223fdd0010441635264d19",
+        "sha256_after": "24a98c62875223f51995c0468f6e46bd6b05e8a06390e6ebc205d1d47620cc93"
+      }
     ]
   },
   "nib": {
