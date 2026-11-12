@@ -45,6 +45,12 @@ jobs:
           echo "Using iPhoneOS SDK $SDK_VERSION"
           xcrun --sdk iphoneos --show-sdk-path
 
+      - name: Regression test NFCARD shell startup (no Rust compilation)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash tests/test-nfcard-rust-env.sh
+
       - name: Install Procursus build tools
         uses: dhinakg/procursus-action@main
         with:
@@ -138,9 +144,7 @@ jobs:
         run: |
           set -euxo pipefail
           bash scripts/stage-nfcard.sh
-          # Diagnostic only: emit the precise failing shell command and line.
-          # The previous NFCARD job exited in ~16 ms without Cargo output.
-          bash -x scripts/build-nfcard-ffi.sh "$GITHUB_WORKSPACE/ThirdParty/NFCARD" "$GITHUB_WORKSPACE/ThirdParty/NFCARD/AirliftFFI"
+          bash scripts/build-nfcard-ffi.sh "$GITHUB_WORKSPACE/ThirdParty/NFCARD" "$GITHUB_WORKSPACE/ThirdParty/NFCARD/AirliftFFI"
 
       - name: Verify staged NFCARD + AirliftFFI cache
         shell: bash
