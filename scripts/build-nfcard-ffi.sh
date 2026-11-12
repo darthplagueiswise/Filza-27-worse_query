@@ -15,7 +15,10 @@ if [[ -s "$OUT/lib/libairlift_ffi.a" &&
 fi
 
 export IPHONEOS_DEPLOYMENT_TARGET=17.0
-source "$HOME/.cargo/env" 2>/dev/null || true
+# Cargo is already on PATH in GitHub's macOS runner. Sourcing ~/.cargo/env
+# may terminate this non-interactive shell through an internal exit.
+command -v cargo >/dev/null
+command -v rustup >/dev/null
 rustup target add aarch64-apple-ios >/dev/null 2>&1 || true
 
 (
