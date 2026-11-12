@@ -2,7 +2,7 @@ name: Verify Filza 27 arm64 IPA
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, fix/ios27-filza-ui-compat ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
