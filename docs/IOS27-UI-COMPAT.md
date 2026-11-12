@@ -56,12 +56,25 @@ The workflow:
 4. Applies the UI backport to the base app's executable and NIB at staging.
 5. Packages an unsigned IPA and uploads it as a workflow artifact.
 
-**Important:** The repository currently pins
-`FilzaSlop-v1.0.2-unsigned.ipa` with SHA-256
+The repository pins `FilzaSlop-v1.0.2-unsigned.ipa` with SHA-256
 `b11ce30a2db6f6bc77773ed30bdb855d7c847830891b14d21230f2d893d5f223`.
-Its executable/NIB equivalence to the original user-provided Filza 4.0 IPA
-must be verified in CI. A different upstream build will deliberately fail
-the preflight; never disable the SHA checks or apply offsets blindly.
+Inspection of the exact pinned artifact confirmed its Mach-O has the **same UUID**
+`8FC478AD-3618-39D8-82B1-91CC16C42E85` and identical NIB as the validated
+Filza 4.0 IPA. Its 11,320,576-byte executable differs from the validated
+11,484,416-byte executable by **12 bytes in the overlapping Mach-O headers**
+plus a 163,840-byte trailing region not present in the pinned artifact.
+All nine binary patch regions (two helper functions / eight callsites) had
+identical preimages in both binaries. Applying the same patches produced a
+checksum-pinned target for the FilzaSlop variant:
+
+- Input Mach-O: `b12dc5231fb410963cfdffd277abb327abfccbae3f223fdd0010441635264d19`
+- Patched Mach-O: `24a98c62875223f51995c0468f6e46bd6b05e8a06390e6ebc205d1d47620cc93`
+- Input/output NIB hashes are identical to those shown above.
+
+The patcher now accepts **two exact source/output hash pairs**, not arbitrary
+Mach-O versions. It still checks the bytes at every patched offset and verifies
+the full output SHA-256. Unknown upstream versions fail closed.
+
 
 This is a build of the existing tweak plus a prebuilt Filza app, **not** a
 source-level recompilation of the proprietary Filza executable. The IPA is
