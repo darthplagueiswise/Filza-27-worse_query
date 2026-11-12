@@ -2,7 +2,7 @@ name: Verify Filza 27 arm64 IPA
 
 on:
   push:
-    branches: [ main, fix/ios27-filza-ui-compat ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -44,20 +44,6 @@ jobs:
           [[ "$SDK_VERSION" == 27 || "$SDK_VERSION" == 27.* ]]
           echo "Using iPhoneOS SDK $SDK_VERSION"
           xcrun --sdk iphoneos --show-sdk-path
-
-      - name: Verify base compatibility before building
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p .theos
-          curl -fL --retry 3 --retry-delay 2 "$BASE_IPA_URL" -o .theos/FilzaSlop-base-unsigned.ipa
-          echo "$BASE_IPA_SHA256  .theos/FilzaSlop-base-unsigned.ipa" | shasum -a 256 -c -
-          PROBE="$(mktemp -d /tmp/filza-base-check.XXXXXX)"
-          trap 'rm -rf "$PROBE"' EXIT
-          unzip -q .theos/FilzaSlop-base-unsigned.ipa 'Payload/*.app/Filza' 'Payload/*.app/TGPlistViewController.nib' -d "$PROBE"
-          APP="$(find "$PROBE/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)"
-          test -n "$APP"
-          python3 scripts/filza-ios27-ui-compat.py --app "$APP" --check-only
 
       - name: Install Procursus build tools
         uses: dhinakg/procursus-action@main
@@ -253,6 +239,14 @@ jobs:
           ! grep -aFq '/api/download' "$DYLIB"
           ! grep -aFq 'ByeTunesApiUrl' "$DYLIB"
 
+      - name: Upload compiled tweak for independent verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: Filza-27-compiled-extension-arm64
+          path: .theos/obj/FilzaApplySandboxExt.dylib
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Stage release resources
         shell: bash
         run: |
@@ -263,6 +257,20 @@ jobs:
           test ! -e .theos/byetunes-resources/Config.plist
           test -s ThirdParty/mond-current/Resources/MondEmbedded.bundle/Info.plist
           test -s ThirdParty/3105/Resources/Filza3105.bundle/UpstreamAppInfo.plist
+
+      - name: Verify base compatibility after compilation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p .theos
+          curl -fL --retry 3 --retry-delay 2 "$BASE_IPA_URL" -o .theos/FilzaSlop-base-unsigned.ipa
+          echo "$BASE_IPA_SHA256  .theos/FilzaSlop-base-unsigned.ipa" | shasum -a 256 -c -
+          PROBE="$(mktemp -d /tmp/filza-base-check.XXXXXX)"
+          trap 'rm -rf "$PROBE"' EXIT
+          unzip -q .theos/FilzaSlop-base-unsigned.ipa 'Payload/*.app/Filza' 'Payload/*.app/TGPlistViewController.nib' -d "$PROBE"
+          APP="$(find "$PROBE/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$APP"
+          python3 scripts/filza-ios27-ui-compat.py --app "$APP" --check-only
 
       - name: Package unsigned IPA
         shell: bash
