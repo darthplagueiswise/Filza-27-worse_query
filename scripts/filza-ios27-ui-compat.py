@@ -2,7 +2,7 @@
 """Backport the two verified Filza 4.0 iOS 27 UI fixes to a matching base.
 
 This does not touch dylibs, sandbox access, signing, or the worse_query implementation.
-Fails closed if either input differs from the exact known original or patched hash.
+Fails closed unless each input matches a verified before/after SHA-256 pair.
 """
 import argparse
 import hashlib
@@ -47,13 +47,22 @@ def apply(app: Path, manifest: dict, check_only: bool) -> None:
         path = app / meta["path"]
         content = path.read_bytes()
         got = sha256(content)
-        if got == meta["sha256_after"]:
+        # Multiple exact upstream baselines can share the same patch sites and
+        # preimage bytes without sharing the same complete Mach-O hash.
+        # Both pre- and post-patch hashes are pinned for every accepted variant.
+        accepted = [(meta["sha256_before"], meta["sha256_after"])]
+        accepted.extend(
+            (v["sha256_before"], v["sha256_after"])
+            for v in meta.get("variants", [])
+        )
+        if any(got == after for _, after in accepted):
             print(f"{kind}: already patched, SHA-256 {got}")
             continue
-        if got != meta["sha256_before"]:
+        target_sha = next((after for before, after in accepted if got == before), None)
+        if target_sha is None:
             raise ValueError(f"{kind}: unknown version at {path}, SHA-256 {got}; aborting")
         changed = transform(content, meta)
-        if sha256(changed) != meta["sha256_after"]:
+        if sha256(changed) != target_sha:
             raise ValueError(f"{kind}: target checksum did not match; aborting")
         pending.append((path, changed))
         print(f"{kind}: validated {len(content)} -> {len(changed)} bytes")
