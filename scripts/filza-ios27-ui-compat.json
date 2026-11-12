@@ -1,0 +1,298 @@
+{
+  "schema": 1,
+  "description": "Byte-exact original Filza 4.0 iOS 27 UI crash fix; does not modify filesystem access primitives",
+  "mach_o": {
+    "path": "Filza",
+    "sha256_before": "467e01e7c5e4df57311a6329624f29c94e51088a383d651b51687725684b5d09",
+    "sha256_after": "5078da6f6e84138eac6212993cc89e2ba10c45f83e6c2953e90c193efcbbcbbe",
+    "patches": [
+      {
+        "offset": "0x22463c",
+        "before": "ff8301d1fa6701a9f85f02a9f65703a9f44f04a9fd7b05a9fd430191f30300aa972c0090e05e42f90fb50c94fd031daaaafa0b94f40300aa222700d042e03e9179690c94fd031daaa4fa0b94f50300aa4d1c0c94f60300aae00315aa93fa0b94e00314aa91fa0b94e05e42f9feb40c94fd031daa99fa0b94f40300aab6000034682c00f0",
+        "after": "fd7bbda9fd030091e00b01a9200100b425290c94e92b41a95f0100eba2000054e00309aae2030aaafd7bc3a83e690c14e0031faafd7bc3a8c0035fd642e03e91fd7bbda9fd030091e00b01a9200100b415290c94e92b41a95f0100eba2000054e00309aae2030aaafd7bc3a826690c14882c009000e140f95b670c94fd7bc3a8c0035fd6"
+      },
+      {
+        "offset": "0x224964",
+        "before": "7f680c94",
+        "after": "36ffff97"
+      },
+      {
+        "offset": "0x2249a8",
+        "before": "6e680c94",
+        "after": "25ffff97"
+      },
+      {
+        "offset": "0xafd78",
+        "before": "723b1294",
+        "after": "41d20594"
+      },
+      {
+        "offset": "0xafe00",
+        "before": "503b1294",
+        "after": "1fd20594"
+      },
+      {
+        "offset": "0xafe40",
+        "before": "403b1294",
+        "after": "0fd20594"
+      },
+      {
+        "offset": "0xb0124",
+        "before": "873a1294",
+        "after": "56d10594"
+      },
+      {
+        "offset": "0xb01ac",
+        "before": "653a1294",
+        "after": "34d10594"
+      },
+      {
+        "offset": "0xb01ec",
+        "before": "553a1294",
+        "after": "24d10594"
+      }
+    ]
+  },
+  "nib": {
+    "path": "TGPlistViewController.nib",
+    "sha256_before": "0c18ed9d23356e75f625f2ccfe47a8d9b4ee6e1ef31d05e8e9298e3d2247420a",
+    "sha256_after": "7b721f251c9f84b273f696df251d8e67a42b79aef564a556e0f97bc9105aab40",
+    "patches": [
+      {
+        "start": 18,
+        "end": 19,
+        "replacement": "1c"
+      },
+      {
+        "start": 30,
+        "end": 31,
+        "replacement": "86"
+      },
+      {
+        "start": 34,
+        "end": 35,
+        "replacement": "5b"
+      },
+      {
+        "start": 38,
+        "end": 39,
+        "replacement": "c3"
+      },
+      {
+        "start": 42,
+        "end": 43,
+        "replacement": "0a"
+      },
+      {
+        "start": 46,
+        "end": 47,
+        "replacement": "54"
+      },
+      {
+        "start": 55,
+        "end": 56,
+        "replacement": "85"
+      },
+      {
+        "start": 57,
+        "end": 57,
+        "replacement": "8c8183"
+      },
+      {
+        "start": 59,
+        "end": 60,
+        "replacement": "82"
+      },
+      {
+        "start": 62,
+        "end": 63,
+        "replacement": "83"
+      },
+      {
+        "start": 65,
+        "end": 66,
+        "replacement": "84"
+      },
+      {
+        "start": 67,
+        "end": 70,
+        "replacement": ""
+      },
+      {
+        "start": 72,
+        "end": 73,
+        "replacement": "ac"
+      },
+      {
+        "start": 75,
+        "end": 76,
+        "replacement": "b3"
+      },
+      {
+        "start": 78,
+        "end": 82,
+        "replacement": "b4"
+      },
+      {
+        "start": 83,
+        "end": 83,
+        "replacement": "83b681"
+      },
+      {
+        "start": 86,
+        "end": 86,
+        "replacement": "81b88581bd8688c3"
+      },
+      {
+        "start": 87,
+        "end": 88,
+        "replacement": "83c68188c78383ca8188cb8383ce8183cf8183d08183d18188d28383d58188d68383d9"
+      },
+      {
+        "start": 90,
+        "end": 151,
+        "replacement": "da"
+      },
+      {
+        "start": 1245,
+        "end": 1246,
+        "replacement": "0c"
+      },
+      {
+        "start": 1251,
+        "end": 1252,
+        "replacement": "0d"
+      },
+      {
+        "start": 1257,
+        "end": 1258,
+        "replacement": "1b"
+      },
+      {
+        "start": 1263,
+        "end": 1264,
+        "replacement": "1b"
+      },
+      {
+        "start": 1269,
+        "end": 1270,
+        "replacement": "1b"
+      },
+      {
+        "start": 1275,
+        "end": 1276,
+        "replacement": "1b"
+      },
+      {
+        "start": 1302,
+        "end": 1308,
+        "replacement": ""
+      },
+      {
+        "start": 1565,
+        "end": 1566,
+        "replacement": "0a"
+      },
+      {
+        "start": 1571,
+        "end": 1572,
+        "replacement": "0b"
+      },
+      {
+        "start": 1630,
+        "end": 1636,
+        "replacement": ""
+      },
+      {
+        "start": 1640,
+        "end": 1641,
+        "replacement": "0e"
+      },
+      {
+        "start": 1646,
+        "end": 1647,
+        "replacement": "10"
+      },
+      {
+        "start": 1653,
+        "end": 1665,
+        "replacement": ""
+      },
+      {
+        "start": 1680,
+        "end": 1698,
+        "replacement": ""
+      },
+      {
+        "start": 1700,
+        "end": 1701,
+        "replacement": "0f"
+      },
+      {
+        "start": 1706,
+        "end": 1707,
+        "replacement": "09"
+      },
+      {
+        "start": 1731,
+        "end": 1732,
+        "replacement": "0f"
+      },
+      {
+        "start": 1743,
+        "end": 1755,
+        "replacement": ""
+      },
+      {
+        "start": 1756,
+        "end": 1762,
+        "replacement": ""
+      },
+      {
+        "start": 1778,
+        "end": 1779,
+        "replacement": "11"
+      },
+      {
+        "start": 1785,
+        "end": 1803,
+        "replacement": ""
+      },
+      {
+        "start": 1839,
+        "end": 1857,
+        "replacement": ""
+      },
+      {
+        "start": 1883,
+        "end": 1901,
+        "replacement": ""
+      },
+      {
+        "start": 1927,
+        "end": 1945,
+        "replacement": ""
+      },
+      {
+        "start": 1971,
+        "end": 1972,
+        "replacement": "18"
+      },
+      {
+        "start": 1983,
+        "end": 1984,
+        "replacement": "09"
+      },
+      {
+        "start": 2001,
+        "end": 2002,
+        "replacement": "1a"
+      },
+      {
+        "start": 2122,
+        "end": 2150,
+        "replacement": ""
+      }
+    ]
+  }
+}
