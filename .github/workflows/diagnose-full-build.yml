@@ -2,9 +2,7 @@ name: Verify Filza 27 arm64 IPA
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    branches: [ main, fix/ios27-filza-ui-compat ]
   workflow_dispatch:
 
 concurrency:
@@ -50,6 +48,21 @@ jobs:
         run: |
           set -euxo pipefail
           bash tests/test-nfcard-rust-env.sh
+
+      - name: Verify and apply exact Filza base patch in a clean test extraction
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROBE="$(mktemp -d /tmp/filza-preflight.XXXXXX)"
+          trap 'rm -rf "$PROBE"' EXIT
+          curl -fL --retry 3 --retry-delay 2 "$BASE_IPA_URL" -o "$PROBE/base.ipa"
+          echo "$BASE_IPA_SHA256  $PROBE/base.ipa" | shasum -a 256 -c -
+          unzip -q "$PROBE/base.ipa" 'Payload/*.app/Filza' 'Payload/*.app/TGPlistViewController.nib' -d "$PROBE"
+          APP="$(find "$PROBE/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$APP"
+          python3 scripts/filza-ios27-ui-compat.py --app "$APP" --check-only
+          python3 scripts/filza-ios27-ui-compat.py --app "$APP"
+          python3 scripts/filza-ios27-ui-compat.py --app "$APP" --check-only
 
       - name: Install Procursus build tools
         uses: dhinakg/procursus-action@main
