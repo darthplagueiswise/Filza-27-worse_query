@@ -1,0 +1,55 @@
+name: Inspect pinned Filza base compatibility
+
+on:
+  push:
+    branches: [ fix/ios27-filza-ui-compat ]
+    paths:
+      - .github/workflows/inspect-filza-base.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: macos-26
+    steps:
+      - name: Checkout compatibility manifest
+        uses: actions/checkout@v4
+
+      - name: Download and inspect pinned baseline
+        shell: bash
+        env:
+          BASE_URL: https://github.com/0xjohnnydev/FilzaSlop/releases/download/v1.0.2/FilzaSlop-v1.0.2-unsigned.ipa
+          BASE_SHA256: b11ce30a2db6f6bc77773ed30bdb855d7c847830891b14d21230f2d893d5f223
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          curl --fail --location --retry 3 "$BASE_URL" --output evidence/Filza-base.ipa
+          echo "$BASE_SHA256  evidence/Filza-base.ipa" | shasum -a 256 --check
+          unzip -q evidence/Filza-base.ipa 'Payload/*.app/Filza' 'Payload/*.app/TGPlistViewController.nib' -d evidence
+          APP="$(find evidence/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$APP"
+          {
+            echo "Mach-O:"
+            shasum -a 256 "$APP/Filza"
+            stat -f 'size=%z' "$APP/Filza"
+            dwarfdump --uuid "$APP/Filza" || true
+            echo "NIB:"
+            shasum -a 256 "$APP/TGPlistViewController.nib"
+            stat -f 'size=%z' "$APP/TGPlistViewController.nib"
+            echo "Compatibility check:"
+            python3 scripts/filza-ios27-ui-compat.py --app "$APP" --check-only
+          } > evidence/metadata.txt 2>&1 || true
+          cat evidence/metadata.txt
+          rm -f evidence/Filza-base.ipa
+
+      - name: Upload baseline evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: filza-base-compat-evidence
+          path: |
+            evidence/Payload/
+            evidence/metadata.txt
+          if-no-files-found: error
+          retention-days: 3
