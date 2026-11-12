@@ -138,7 +138,9 @@ jobs:
         run: |
           set -euxo pipefail
           bash scripts/stage-nfcard.sh
-          bash scripts/build-nfcard-ffi.sh "$GITHUB_WORKSPACE/ThirdParty/NFCARD" "$GITHUB_WORKSPACE/ThirdParty/NFCARD/AirliftFFI"
+          # Diagnostic only: emit the precise failing shell command and line.
+          # The previous NFCARD job exited in ~16 ms without Cargo output.
+          bash -x scripts/build-nfcard-ffi.sh "$GITHUB_WORKSPACE/ThirdParty/NFCARD" "$GITHUB_WORKSPACE/ThirdParty/NFCARD/AirliftFFI"
 
       - name: Verify staged NFCARD + AirliftFFI cache
         shell: bash
