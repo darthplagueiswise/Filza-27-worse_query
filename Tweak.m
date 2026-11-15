@@ -14,6 +14,7 @@
 #include <sys/sysctl.h>
 
 #include "MCMFilzaIntegration.h"
+#include "WQAppGroupNameResolver.h"
 #include "PosterBoardFeature.h"
 #include "kexploit/kexploit_opa334.h"
 #include "kexploit/kutils.h"
@@ -1299,9 +1300,65 @@ static void runOptInPasteCopyProbe(void) {
         copied, verified, destinationRemoved && sourceRemoved, error);
 }
 
+// Presentation-only: preserve FileItem.fileName/aFileName, which Filza uses
+// for operations. Only paint a readable name into the visible list/grid cell.
+static IMP origWQGroupTableCell = NULL;
+static IMP origWQGroupGridCell = NULL;
+
+static id WQFilzaPresentGroupCell(id browser, id cell)
+{
+    if (!cell || ![cell respondsToSelector:NSSelectorFromString(@"nameLabel")])
+        return cell;
+    id label = ((id (*)(id, SEL))objc_msgSend)(cell,
+        NSSelectorFromString(@"nameLabel"));
+    if (![label isKindOfClass:UILabel.class]) return cell;
+    NSString *uuid = ((UILabel *)label).text;
+    if (![uuid isKindOfClass:NSString.class] ||
+        ![[NSUUID alloc] initWithUUIDString:uuid]) return cell;
+    if (![browser respondsToSelector:NSSelectorFromString(@"currentPath")])
+        return cell;
+    NSString *parent = ((id (*)(id, SEL))objc_msgSend)(browser,
+        NSSelectorFromString(@"currentPath"));
+    if (![parent isKindOfClass:NSString.class] || !parent.length) return cell;
+    NSString *resolved = WQFilzaAppGroupLabelForPath(
+        [parent stringByAppendingPathComponent:uuid]);
+    if (resolved.length) ((UILabel *)label).text = resolved;
+    return cell;
+}
+
+static id hookWQGroupTableCell(id self, SEL cmd, id table, id indexPath)
+{
+    id cell = ((id (*)(id, SEL, id, id))origWQGroupTableCell)(
+        self, cmd, table, indexPath);
+    return WQFilzaPresentGroupCell(self, cell);
+}
+
+static id hookWQGroupGridCell(id self, SEL cmd, id collection, id indexPath)
+{
+    id cell = ((id (*)(id, SEL, id, id))origWQGroupGridCell)(
+        self, cmd, collection, indexPath);
+    return WQFilzaPresentGroupCell(self, cell);
+}
+
 #pragma mark - Hook Installation
 
 static void installHooks(void) {
+    // Scope this hook to the Filza browser renderer. Do not mutate FileItem.
+    Class browserView = NSClassFromString(@"TIGIBrowserView");
+    if (browserView) {
+        SEL tableSelector = @selector(tableView:cellForRowAtIndexPath:);
+        Method tableMethod = class_getInstanceMethod(browserView, tableSelector);
+        if (tableMethod) {
+            origWQGroupTableCell = method_getImplementation(tableMethod);
+            method_setImplementation(tableMethod, (IMP)hookWQGroupTableCell);
+        }
+        SEL gridSelector = @selector(collectionView:cellForItemAtIndexPath:);
+        Method gridMethod = class_getInstanceMethod(browserView, gridSelector);
+        if (gridMethod) {
+            origWQGroupGridCell = method_getImplementation(gridMethod);
+            method_setImplementation(gridMethod, (IMP)hookWQGroupGridCell);
+        }
+    }
     Class preferences = NSClassFromString(@"TGPreferences");
     if (preferences) {
         Method defaultPath = class_getInstanceMethod(preferences, NSSelectorFromString(@"defaultPath"));
