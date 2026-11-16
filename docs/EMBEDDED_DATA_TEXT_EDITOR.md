@@ -42,10 +42,13 @@ logic remain the responsibility of Filza.
 - XML and binary plist recursively nested in NSData/Base64.
 - JSON, including Base64-containing string values inside JSON objects/arrays.
 - UTF-8 text and raw bytes as HEX.
-- For Base64 hidden in JSON, the display uses a reversible structured
-  __filza_inline_base64_v1__ wrapper showing its type, original string and
-  decoded data. This wrapper is ONLY for display/editing: it is removed from
-  JSON when the value is restored to Base64.
+- For Base64 hidden in JSON, the text editor displays only the decoded
+  JSON, readable UTF-8, XML or HEX value. The original Base64, encoding
+  kind and JSON path are held in a backend-only map attached to the
+  document, never shown as marker properties in the editor.
+- When an edited JSON value is saved, its exact JSON path and original
+  encoding determine which layers must be reconstructed. Unedited values
+  return their original encoded bytes, unchanged.
 - Binary plist inside a JSON Base64 string is presented as editable XML
   (as a JSON string), when Foundation can encode its types; otherwise HEX.
 - Unchanged payloads keep their exact original encoded bytes and wrapping.

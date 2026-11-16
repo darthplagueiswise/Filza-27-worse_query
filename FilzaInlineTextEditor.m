@@ -33,6 +33,7 @@ typedef NS_ENUM(NSUInteger, FZIEncoding) {
 @property(nonatomic, strong) NSArray<FZIBlock *> *children;
 @property(nonatomic, strong) NSData *originalBytes;
 @property(nonatomic, copy) NSString *displayIndent;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *jsonEncodings;
 @end
 @implementation FZIBlock @end
 
@@ -241,41 +242,60 @@ static NSData *FZIPlistData(NSString *body, NSPropertyListFormat format, NSError
 static NSString *FZIProjectXML(NSString *, NSMutableArray<FZIBlock *> *, NSUInteger);
 static NSString *FZIRestoreXML(NSString *, NSArray<FZIBlock *> *, NSError **);
 
-static NSString *const kFZIJSONMarker = @"__filza_inline_base64_v1__";
-static id FZIProjectJSONValue(id value, NSUInteger depth);
-static id FZIRestoreJSONValue(id value, NSUInteger depth, NSError **error);
+// JSON/Base64 transport metadata belongs exclusively to the backend.
+// The text editor sees only decoded JSON/XML/HEX values, never serialized
+// marker objects, original Base64 copies or bookkeeping keys.
+static NSString *FZIJSONPath(NSString *parent, NSString *member) {
+    NSString *escaped = [[member stringByReplacingOccurrencesOfString:@"~"
+        withString:@"~0"] stringByReplacingOccurrencesOfString:@"/"
+        withString:@"~1"];
+    return [parent stringByAppendingFormat:@"/%@", escaped];
+}
+static id FZIProjectJSONValue(id value, NSString *path,
+    NSMutableDictionary<NSString *, NSDictionary *> *records, NSUInteger depth);
+static id FZIRestoreJSONValue(id value, NSString *path,
+    NSDictionary<NSString *, NSDictionary *> *records, NSUInteger depth,
+    NSError **error);
+static id FZIRestoreJSONNode(id value, NSString *path,
+    NSDictionary<NSString *, NSDictionary *> *records, NSUInteger depth,
+    BOOL inspectCurrent, NSError **error);
 
-static id FZIProjectJSONValue(id value, NSUInteger depth) {
+static id FZIProjectJSONValue(id value, NSString *path,
+    NSMutableDictionary<NSString *, NSDictionary *> *records, NSUInteger depth) {
     if (depth > 14) return value;
     if ([value isKindOfClass:NSDictionary.class]) {
         NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:
             [value count]];
-        for (id key in value)
-            out[key] = FZIProjectJSONValue(value[key], depth + 1) ?: NSNull.null;
+        for (NSString *key in value)
+            out[key] = FZIProjectJSONValue(value[key], FZIJSONPath(path,key),
+                records,depth+1) ?: NSNull.null;
         return out;
     }
     if ([value isKindOfClass:NSArray.class]) {
         NSMutableArray *out = [NSMutableArray arrayWithCapacity:[value count]];
-        for (id part in value)
-            [out addObject:FZIProjectJSONValue(part, depth + 1) ?: NSNull.null];
+        NSUInteger i=0;
+        for (id part in value) {
+            NSString *childPath = FZIJSONPath(path,
+                [NSString stringWithFormat:@"%lu", (unsigned long)i++]);
+            [out addObject:FZIProjectJSONValue(part,childPath,
+                records,depth+1) ?: NSNull.null];
+        }
         return out;
     }
     if (![value isKindOfClass:NSString.class] || [value length] < 8) return value;
     NSString *string = (NSString *)value;
-    if (![string containsString:@"="] && ![string containsString:@"+"] &&
-        ![string containsString:@"/"] && string.length < 24) return value;
     NSData *bytes = FZIBase64(string);
     if (!bytes || bytes.length > 4 * 1024 * 1024) return value;
     NSString *format = nil;
-    id content = nil;
+    id decoded = nil;
     NSPropertyListFormat plistFormat = NSPropertyListXMLFormat_v1_0;
     id plist = [NSPropertyListSerialization propertyListWithData:bytes
         options:0 format:&plistFormat error:nil];
     if (plist) {
         NSData *asXML = [NSPropertyListSerialization dataWithPropertyList:plist
             format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
-        content = FZIPlistBody(asXML);
-        if (content) format = plistFormat == NSPropertyListBinaryFormat_v1_0
+        decoded = FZIPlistBody(asXML);
+        if (decoded) format = plistFormat == NSPropertyListBinaryFormat_v1_0
             ? @"bplist" : @"xmlplist";
     }
     if (!format) {
@@ -283,7 +303,7 @@ static id FZIProjectJSONValue(id value, NSUInteger depth) {
             options:NSJSONReadingFragmentsAllowed error:nil];
         if (json) {
             format = @"json";
-            content = FZIProjectJSONValue(json, depth + 1);
+            decoded = FZIProjectJSONValue(json,path,records,depth+1);
         }
     }
     if (!format) {
@@ -292,78 +312,90 @@ static id FZIProjectJSONValue(id value, NSUInteger depth) {
         if (text && [text rangeOfString:
             [NSString stringWithFormat:@"%C", (unichar)0]].location == NSNotFound) {
             format = @"utf8";
-            content = text;
+            decoded = text;
         }
     }
-    if (!format) { format = @"hex"; content = FZIHex(bytes); }
-    return @{kFZIJSONMarker:@{@"format":format,
-                              @"original":string, @"value":content}};
+    if (!format) { format = @"hex"; decoded = FZIHex(bytes); }
+    if (!decoded) return value;
+    records[path] = @{@"format":format, @"original":string,
+                      @"display":decoded};
+    return decoded;
 }
 
-static id FZIRestoreJSONValue(id value, NSUInteger depth, NSError **error) {
+static id FZIRestoreJSONValue(id value, NSString *path,
+    NSDictionary<NSString *, NSDictionary *> *records, NSUInteger depth,
+    NSError **error) {
+    return FZIRestoreJSONNode(value,path,records,depth,YES,error);
+}
+
+static id FZIRestoreJSONNode(id value, NSString *path,
+    NSDictionary<NSString *, NSDictionary *> *records, NSUInteger depth,
+    BOOL inspectCurrent, NSError **error) {
     if (depth > 14) {
         if (error) *error = FZIError(@"Embedded JSON exceeds maximum nesting depth.");
         return nil;
     }
-    if ([value isKindOfClass:NSDictionary.class]) {
-        NSDictionary *dict = value;
-        id wrapper = dict[kFZIJSONMarker];
-        if (dict.count == 1 && [wrapper isKindOfClass:NSDictionary.class]) {
-            NSString *format = wrapper[@"format"];
-            NSString *original = wrapper[@"original"];
-            id payload = wrapper[@"value"];
-            if (![format isKindOfClass:NSString.class] ||
-                ![original isKindOfClass:NSString.class] || !payload ||
-                !FZIBase64(original)) {
-                if (error) *error = FZIError(@"Malformed inline Base64 JSON marker.");
+    NSDictionary *metadata = inspectCurrent ? records[path] : nil;
+    if (metadata) {
+        id unchangedView = metadata[@"display"];
+        NSString *original = metadata[@"original"];
+        NSString *format = metadata[@"format"];
+        if (unchangedView && [unchangedView isEqual:value]) return original;
+        NSData *bytes = nil;
+        if ([format isEqualToString:@"bplist"] ||
+            [format isEqualToString:@"xmlplist"]) {
+            if (![value isKindOfClass:NSString.class]) {
+                if (error) *error = FZIError(@"Embedded plist must remain XML text.");
                 return nil;
             }
-            id originalView = FZIProjectJSONValue(original, 0);
-            if ([originalView isKindOfClass:NSDictionary.class] &&
-                [originalView[kFZIJSONMarker] isKindOfClass:NSDictionary.class] &&
-                [originalView[kFZIJSONMarker][@"value"] isEqual:payload] &&
-                [originalView[kFZIJSONMarker][@"format"] isEqual:format])
-                return original; // unchanged encoded string: identical bytes.
-            NSData *reencoded = nil;
-            if ([format isEqualToString:@"bplist"] ||
-                [format isEqualToString:@"xmlplist"]) {
-                if (![payload isKindOfClass:NSString.class]) {
-                    if (error) *error = FZIError(@"Embedded plist must remain XML text.");
-                    return nil;
-                }
-                reencoded = FZIPlistData(payload,
-                    [format isEqualToString:@"bplist"]
-                        ? NSPropertyListBinaryFormat_v1_0
-                        : NSPropertyListXMLFormat_v1_0, error);
-            } else if ([format isEqualToString:@"json"]) {
-                id child = FZIRestoreJSONValue(payload, depth + 1, error);
-                if (!child) return nil;
-                reencoded = [NSJSONSerialization dataWithJSONObject:child
-                    options:NSJSONWritingFragmentsAllowed error:error];
-            } else if ([format isEqualToString:@"utf8"]) {
-                if ([payload isKindOfClass:NSString.class])
-                    reencoded = [payload dataUsingEncoding:NSUTF8StringEncoding];
-            } else if ([format isEqualToString:@"hex"]) {
-                if ([payload isKindOfClass:NSString.class])
-                    reencoded = FZIUnhex(payload);
-            }
-            if (!reencoded && error && !*error)
-                *error = FZIError(@"Invalid edited nested Base64 payload.");
-            return reencoded ? [reencoded base64EncodedStringWithOptions:0] : nil;
-        }
-        NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:
-            dict.count];
-        for (id key in dict) {
-            id child = FZIRestoreJSONValue(dict[key], depth + 1, error);
+            bytes = FZIPlistData(value, [format isEqualToString:@"bplist"] ?
+                NSPropertyListBinaryFormat_v1_0 :
+                NSPropertyListXMLFormat_v1_0,error);
+        } else if ([format isEqualToString:@"json"]) {
+            // Restore children first; this location is the parent encoder.
+            // A nested Base64 value may have its own metadata under this path.
+            id child = FZIRestoreJSONNode(value,path,records,depth+1,NO,error);
             if (!child) return nil;
-            out[key] = child;
+            bytes = [NSJSONSerialization dataWithJSONObject:child
+                options:NSJSONWritingFragmentsAllowed error:error];
+        } else if ([format isEqualToString:@"utf8"]) {
+            if (![value isKindOfClass:NSString.class]) {
+                if (error) *error = FZIError(@"Embedded UTF-8 must remain text.");
+                return nil;
+            }
+            bytes = [value dataUsingEncoding:NSUTF8StringEncoding];
+        } else if ([format isEqualToString:@"hex"]) {
+            if (![value isKindOfClass:NSString.class]) {
+                if (error) *error = FZIError(@"Embedded bytes require hexadecimal text.");
+                return nil;
+            }
+            bytes = FZIUnhex(value);
+        }
+        if (!bytes) {
+            if (error && !*error)
+                *error = FZIError(@"Could not encode edited Base64 JSON value.");
+            return nil;
+        }
+        return [bytes base64EncodedStringWithOptions:0];
+    }
+    if ([value isKindOfClass:NSDictionary.class]) {
+        NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:
+            [value count]];
+        for (NSString *key in value) {
+            id child=FZIRestoreJSONNode(value[key],FZIJSONPath(path,key),records,
+                depth+1,YES,error);
+            if (!child) return nil;
+            out[key]=child;
         }
         return out;
     }
     if ([value isKindOfClass:NSArray.class]) {
         NSMutableArray *out = [NSMutableArray arrayWithCapacity:[value count]];
+        NSUInteger i=0;
         for (id item in value) {
-            id child = FZIRestoreJSONValue(item, depth + 1, error);
+            NSString *childPath=FZIJSONPath(path,
+                [NSString stringWithFormat:@"%lu",(unsigned long)i++]);
+            id child=FZIRestoreJSONNode(item,childPath,records,depth+1,YES,error);
             if (!child) return nil;
             [out addObject:child];
         }
@@ -395,7 +427,8 @@ static NSString *FZIProjectDecodedData(NSData *bytes, FZIBlock *block, NSUIntege
     id json=[NSJSONSerialization JSONObjectWithData:bytes
         options:NSJSONReadingFragmentsAllowed error:nil];
     if(json) {
-        id readable = FZIProjectJSONValue(json, depth + 1);
+        block.jsonEncodings = [NSMutableDictionary dictionary];
+        id readable = FZIProjectJSONValue(json, @"", block.jsonEncodings, depth + 1);
         NSData *pretty=[NSJSONSerialization dataWithJSONObject:readable
             options:NSJSONWritingPrettyPrinted|NSJSONWritingFragmentsAllowed error:nil];
         if(pretty) {
@@ -453,7 +486,8 @@ static NSString *FZIProjectXML(NSString *source,
                 if(( [embedded isKindOfClass:NSDictionary.class] ||
                      [embedded isKindOfClass:NSArray.class] ) &&
                     ( [trimmed hasPrefix:@"{"] || [trimmed hasPrefix:@"["] )) {
-                    id readable = FZIProjectJSONValue(embedded, depth + 1);
+                    block.jsonEncodings = [NSMutableDictionary dictionary];
+                    id readable = FZIProjectJSONValue(embedded, @"", block.jsonEncodings, depth + 1);
                     NSData *pretty=[NSJSONSerialization dataWithJSONObject:readable
                         options:NSJSONWritingPrettyPrinted error:nil];
                     if(pretty) {
@@ -587,7 +621,7 @@ static NSString *FZIRestoreBlock(NSString *body, FZIBlock *block, NSError **erro
             [content dataUsingEncoding:NSUTF8StringEncoding]
             options:NSJSONReadingFragmentsAllowed error:error];
         if(!json) return nil;
-        id restored = FZIRestoreJSONValue(json, 0, error);
+        id restored = FZIRestoreJSONValue(json, @"", block.jsonEncodings ?: @{}, 0, error);
         if(!restored) return nil;
         bytes=[NSJSONSerialization dataWithJSONObject:restored
             options:NSJSONWritingFragmentsAllowed error:error];

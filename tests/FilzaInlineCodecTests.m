@@ -61,8 +61,10 @@ int main(int argc, const char *argv[]) {
             @"ABProps block must have a searchable category label");
         FZIRequire([projection.display containsString:@"<key>1004</key>"],
             @"all 6,916 numeric ABProps values must be visible");
-        FZIRequire([projection.display containsString:@"__filza_inline_base64_v1__"],
-            @"nested JSON Base64 values must be represented");
+        FZIRequire([projection.display containsString:@"\"nested\" : {"],
+            @"nested Base64 JSON must appear directly as decoded JSON");
+        FZIRequire([projection.display rangeOfString:@"__filza_inline_base64_v1__"].location == NSNotFound,
+            @"transport metadata must never appear in the user-visible editor");
         FZIRequire([projection.display containsString:@"00 01 02 03"],
             @"short opaque Base64 must decode to HEX");
         NSError *error=nil;
@@ -75,6 +77,8 @@ int main(int argc, const char *argv[]) {
             withString:@"EDITED"];
         edited = [edited stringByReplacingOccurrencesOfString:@"Sample"
             withString:@"Changed"];
+        edited = [edited stringByReplacingOccurrencesOfString:@"\"opaque\" : \"00 01"
+            withString:@"\"opaque\" : \"FF 01"];
         FZIRequire(![edited isEqualToString:projection.display],
             @"test must actually modify the visible projection");
         error=nil;
@@ -95,6 +99,17 @@ int main(int argc, const char *argv[]) {
             finalRoot[@"admc"] options:0 error:&error];
         FZIRequire([finalAdmc[0][@"title"] isEqualToString:@"Changed"],
             @"nested JSON edit was not re-encoded correctly");
+        NSData *nestedData=[[NSData alloc] initWithBase64EncodedString:
+            finalAdmc[0][@"nested"] options:0];
+        NSDictionary *nestedDecoded=[NSJSONSerialization JSONObjectWithData:
+            nestedData options:0 error:&error];
+        NSData *opaqueModified=[[NSData alloc] initWithBase64EncodedString:
+            nestedDecoded[@"opaque"] options:0];
+        FZIRequire(opaqueModified.length == 16 &&
+            ((const unsigned char *)opaqueModified.bytes)[0] == 0xFF,
+            @"edited HEX inside nested JSON/Base64 did not round-trip");
+        FZIRequire([finalRoot[@"OwnCountryCode"] isEqualToString:identifier],
+            @"untouched Base64 value must retain its original representation");
         NSData *backToBinary = FZIPlist(finalRoot,
             NSPropertyListBinaryFormat_v1_0);
         FZIRequire([[backToBinary subdataWithRange:NSMakeRange(0,8)]
