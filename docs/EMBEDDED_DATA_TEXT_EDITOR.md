@@ -1,85 +1,83 @@
-# Inline decoded plist data in Filza's EXISTING Text Editor
+# Filza native inline embedded-data editor
 
-This replaces the earlier Base64 navigation button implementation.
-No new toolbar button, menu, sheet, or secondary editor is installed.
-Filza's original plist editor is intentionally untouched.
+This module extends the ORIGINAL TGFastTextEditViewController and its
+ICTextView/HCodeAttributedString, not the Filza plist editor. No new toolbar,
+button, sheet or secondary editor is introduced.
 
-## What is different
+## Why the previous build could not save
 
-A plist opened as **Text** is still displayed in Filza's syntax-highlighted
-text editor, with the same visible <plist>, <dict>, <key>, <data>, and
-<string> markup. Instead of Base64 noise between the *existing* <data>
-tags, the content is projected inline as its decoded plist dictionary,
-JSON, readable UTF-8, or hexadecimal data.
+The old code relied on intercepting UIApplication.sendAction and temporarily
+changing UITextView.text. That did not reliably run before Filza's native
+saveClicked: method parsed XML and tried to save it. The view therefore sent
+inline JSON directly inside <data> to NSPropertyListSerialization, which is
+not valid plist XML, resulting in the system "data is not in the correct
+format" error.
 
-For example, the existing markup:
+Native Mach-O inspection of Filza confirms saveClicked: gets textEditor.text,
+parses plist with propertyListWithData:options:format:error:, and uses the
+native property list serializer before writing to the original path.
 
-    <key>DownloadPolicy</key>
-    <data>YnBsaXN0MDD...</data>
+The revised module hooks TGFastTextEditViewController.saveClicked: DIRECTLY,
+validates and re-encodes every modified <data> block, then temporarily
+returns reconstructed XML from ICTextView.text for that native save call.
+The original save path, permissions, metadata handling, and binary output
+logic remain the responsibility of Filza.
 
-is displayed *in that exact part of the document* as something like:
+## Visibility and syntax
 
-    <key>DownloadPolicy</key>
-    <data>
-        <dict>
-            <key>$archiver</key>
-            <string>NSKeyedArchiver</string>
-            ...
-        </dict>
-    </data>
+- Retains the original ICTextView and HCodeAttributedString text storage.
+- Replaces projected content through NSTextStorage.beginEditing/replace/
+  endEditing and requests the original highlighter to repaint it.
+- Maintains the existing line numbers, navigation, search bar and Save UI.
+- Indents only the DISPLAY version of XML/JSON/HEX nested payloads; added
+  spacing is removed when re-encoding changed blocks.
+- All valid opaque Base64 values in plist strings of length >=16 are now
+  shown as HEX, including 16-byte binary identifiers.
+- Does not claim opaque bytes are plaintext, nor interpret encrypted data.
+- Labels gabp.* blocks as "WhatsApp ABProps" with their actual entry count;
+  the labels are display-only XML comments and numeric IDs are not renamed.
 
-The view is a **reversible projection**. It is not a valid disk plist until
-the original Base64 encodings are restored by the save bridge. Ordinary
-text outside the projected fields is left in place, byte-for-byte at the
-string level (subject to the original file encoding and native Filza save).
+## Recursive formats
 
-Plists embedded inside <data> are rendered recursively (maximum 18 levels).
-JSON text embedded in <string> fields is pretty-printed in place.
-Unrecognized binary fields display hexadecimal; their original bytes remain
-unchanged if not edited. Foundation's property-list XML serializer may not
-represent some NSKeyedArchive UID data; such data falls back to HEX rather
-than creating an invalid or lossy fake representation.
+- XML and binary plist recursively nested in NSData/Base64.
+- JSON, including Base64-containing string values inside JSON objects/arrays.
+- UTF-8 text and raw bytes as HEX.
+- For Base64 hidden in JSON, the display uses a reversible structured
+  __filza_inline_base64_v1__ wrapper showing its type, original string and
+  decoded data. This wrapper is ONLY for display/editing: it is removed from
+  JSON when the value is restored to Base64.
+- Binary plist inside a JSON Base64 string is presented as editable XML
+  (as a JSON string), when Foundation can encode its types; otherwise HEX.
+- Unchanged payloads keep their exact original encoded bytes and wrapping.
+- A changed payload is fully validated, then reserialized in its original
+  plist/JSON/raw format; its containing Base64 is rebuilt from inside out.
+- Unsupported proprietary, compressed, or encrypted carriers remain HEX
+  without falsely representing their semantics.
 
-## Saving
+## Safeguards
 
-When the native editor's save/done action is dispatched through UIKit,
-the text getter temporarily supplies a rebuilt XML document:
-- Unedited projected fields recover their **exact original Base64**, including
-  all original line breaks.
-- Edited nested plists are encoded in their original binary/XML form, then
-  all parent layers are encoded back to Base64.
-- Edited embedded JSON is parsed and reserialized.
-- Edited raw bytes are strictly validated as hexadecimal.
-- Before the original Filza save action proceeds, the whole reconstructed
-  plist is validated. Invalid nested data block the save with an error.
+- Editing invalid embedded JSON/XML or HEX blocks prevents Save and reports
+  an error rather than writing the invalid representation.
+- Edited XML/plist roots must pass NSPropertyListSerialization before Save.
+- The stock native Filza save method still determines the outer format
+  (XML/binary), handles original file write privileges and shows write errors.
+- The module does not alter sandbox, app-group, or filesystem privileges.
 
-The *visible editor text* is never replaced with Base64 on-screen.
+## Tests
 
-**Runtime caveat:** the original Filza executable is closed-source. This
-bridge uses the native text/code editor UIViewController, UITextView and
-UIKit save-action dispatch points. If a particular Filza build saves from a
-custom internal text buffer, performs asynchronous text reads, or does not
-dispatch its save action via UIApplication, the native save path must be
-investigated and adapted against that exact build. This is NOT proof that
-the file was safely rewritten on-device just because a CI build succeeds.
+The same source file can be compiled in a Foundation-only codec test mode.
+The iOS 27 GitHub Actions workflow runs tests/FilzaInlineCodecTests.m before
+the full Theos build. It uses ONLY SYNTHETIC DATA (no private WhatsApp
+files). The tests verify 6,916 numeric parameter values, nested JSON and
+Base64, 16-byte HEX, a no-edit byte-preserving reconstruction, edits across
+formats, preservation of unchanged binary children, and invalid JSON
+rejection. iPhone runtime behavior and native colors/save results still
+require a device test; a successful CI build does not prove UI behavior.
 
-Binary plist on-disk preservation also depends on Filza's native save
-implementation; its text editor may save XML rather than binary. The
-original source format must be independently verified on device.
+## Upstream prior art
 
-## Scope
-
-The filesystem backend, app-group resolver, plist viewer, file navigation,
-and all existing Filza features remain unchanged. This does not change
-filesystem entitlements or introduce a new write primitive.
-
-## Testing
-
-1. Open a copy of a known plist through **Text Editor**, not Plist Editor.
-2. Confirm there is NO Base64 button; decoded content appears inline.
-3. Without editing, save a copy and compare its parsed tree to the source.
-4. Edit an inner numeric/string/boolean field and save; reopen and validate
-   the new nested plist bytes and the unchanged outer fields.
-5. For binary originals, compare initial and final on-disk header (bplist00)
-   and report format drift instead of assuming it stayed binary.
-6. Test malformed embedded data; saving must fail before corrupting the file.
+The embedded detection strategy is aligned with the concepts demonstrated
+by MIT-licensed Plist-Parser (mb4n6/Plist-Parser) and plb (brunerd/plb);
+the Filza integration is written with native Apple Foundation/UIKit to
+avoid Python/shell runtimes and keep the existing editor.
+No source code was copied from those repositories.

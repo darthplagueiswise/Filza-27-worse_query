@@ -75,6 +75,16 @@ jobs:
             -o "$TEST_BIN"
           "$TEST_BIN"
 
+      - name: Native plist, JSON and Base64 inline codec tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          TEST_BIN="$(mktemp -t filza-inline-codec.XXXXXX)"
+          trap 'rm -f "$TEST_BIN"' EXIT
+          xcrun clang -fobjc-arc -fblocks -framework Foundation \
+            tests/FilzaInlineCodecTests.m -o "$TEST_BIN"
+          "$TEST_BIN"
+
       - name: Install Procursus build tools
         uses: dhinakg/procursus-action@main
         with:

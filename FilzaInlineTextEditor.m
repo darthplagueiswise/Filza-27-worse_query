@@ -1,7 +1,11 @@
 // Inline Base64 projection for Filza's existing text editor.
 // The visible text is transient; native save receives reconstructed XML.
 // This file does not alter Filza's plist editor, file-browser, or sandbox backend.
+#if defined(FILZA_INLINE_CODEC_TESTS)
+#import <Foundation/Foundation.h>
+#else
 @import UIKit;
+#endif
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <CoreFoundation/CoreFoundation.h>
@@ -28,6 +32,7 @@ typedef NS_ENUM(NSUInteger, FZIEncoding) {
 @property(nonatomic) FZIEncoding encoding;
 @property(nonatomic, strong) NSArray<FZIBlock *> *children;
 @property(nonatomic, strong) NSData *originalBytes;
+@property(nonatomic, copy) NSString *displayIndent;
 @end
 @implementation FZIBlock @end
 
@@ -236,6 +241,137 @@ static NSData *FZIPlistData(NSString *body, NSPropertyListFormat format, NSError
 static NSString *FZIProjectXML(NSString *, NSMutableArray<FZIBlock *> *, NSUInteger);
 static NSString *FZIRestoreXML(NSString *, NSArray<FZIBlock *> *, NSError **);
 
+static NSString *const kFZIJSONMarker = @"__filza_inline_base64_v1__";
+static id FZIProjectJSONValue(id value, NSUInteger depth);
+static id FZIRestoreJSONValue(id value, NSUInteger depth, NSError **error);
+
+static id FZIProjectJSONValue(id value, NSUInteger depth) {
+    if (depth > 14) return value;
+    if ([value isKindOfClass:NSDictionary.class]) {
+        NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:
+            [value count]];
+        for (id key in value)
+            out[key] = FZIProjectJSONValue(value[key], depth + 1) ?: NSNull.null;
+        return out;
+    }
+    if ([value isKindOfClass:NSArray.class]) {
+        NSMutableArray *out = [NSMutableArray arrayWithCapacity:[value count]];
+        for (id part in value)
+            [out addObject:FZIProjectJSONValue(part, depth + 1) ?: NSNull.null];
+        return out;
+    }
+    if (![value isKindOfClass:NSString.class] || [value length] < 8) return value;
+    NSString *string = (NSString *)value;
+    if (![string containsString:@"="] && ![string containsString:@"+"] &&
+        ![string containsString:@"/"] && string.length < 24) return value;
+    NSData *bytes = FZIBase64(string);
+    if (!bytes || bytes.length > 4 * 1024 * 1024) return value;
+    NSString *format = nil;
+    id content = nil;
+    NSPropertyListFormat plistFormat = NSPropertyListXMLFormat_v1_0;
+    id plist = [NSPropertyListSerialization propertyListWithData:bytes
+        options:0 format:&plistFormat error:nil];
+    if (plist) {
+        NSData *asXML = [NSPropertyListSerialization dataWithPropertyList:plist
+            format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
+        content = FZIPlistBody(asXML);
+        if (content) format = plistFormat == NSPropertyListBinaryFormat_v1_0
+            ? @"bplist" : @"xmlplist";
+    }
+    if (!format) {
+        id json = [NSJSONSerialization JSONObjectWithData:bytes
+            options:NSJSONReadingFragmentsAllowed error:nil];
+        if (json) {
+            format = @"json";
+            content = FZIProjectJSONValue(json, depth + 1);
+        }
+    }
+    if (!format) {
+        NSString *text = [[NSString alloc] initWithData:bytes
+            encoding:NSUTF8StringEncoding];
+        if (text && [text rangeOfString:
+            [NSString stringWithFormat:@"%C", (unichar)0]].location == NSNotFound) {
+            format = @"utf8";
+            content = text;
+        }
+    }
+    if (!format) { format = @"hex"; content = FZIHex(bytes); }
+    return @{kFZIJSONMarker:@{@"format":format,
+                              @"original":string, @"value":content}};
+}
+
+static id FZIRestoreJSONValue(id value, NSUInteger depth, NSError **error) {
+    if (depth > 14) {
+        if (error) *error = FZIError(@"Embedded JSON exceeds maximum nesting depth.");
+        return nil;
+    }
+    if ([value isKindOfClass:NSDictionary.class]) {
+        NSDictionary *dict = value;
+        id wrapper = dict[kFZIJSONMarker];
+        if (dict.count == 1 && [wrapper isKindOfClass:NSDictionary.class]) {
+            NSString *format = wrapper[@"format"];
+            NSString *original = wrapper[@"original"];
+            id payload = wrapper[@"value"];
+            if (![format isKindOfClass:NSString.class] ||
+                ![original isKindOfClass:NSString.class] || !payload ||
+                !FZIBase64(original)) {
+                if (error) *error = FZIError(@"Malformed inline Base64 JSON marker.");
+                return nil;
+            }
+            id originalView = FZIProjectJSONValue(original, 0);
+            if ([originalView isKindOfClass:NSDictionary.class] &&
+                [originalView[kFZIJSONMarker] isKindOfClass:NSDictionary.class] &&
+                [originalView[kFZIJSONMarker][@"value"] isEqual:payload] &&
+                [originalView[kFZIJSONMarker][@"format"] isEqual:format])
+                return original; // unchanged encoded string: identical bytes.
+            NSData *reencoded = nil;
+            if ([format isEqualToString:@"bplist"] ||
+                [format isEqualToString:@"xmlplist"]) {
+                if (![payload isKindOfClass:NSString.class]) {
+                    if (error) *error = FZIError(@"Embedded plist must remain XML text.");
+                    return nil;
+                }
+                reencoded = FZIPlistData(payload,
+                    [format isEqualToString:@"bplist"]
+                        ? NSPropertyListBinaryFormat_v1_0
+                        : NSPropertyListXMLFormat_v1_0, error);
+            } else if ([format isEqualToString:@"json"]) {
+                id child = FZIRestoreJSONValue(payload, depth + 1, error);
+                if (!child) return nil;
+                reencoded = [NSJSONSerialization dataWithJSONObject:child
+                    options:NSJSONWritingFragmentsAllowed error:error];
+            } else if ([format isEqualToString:@"utf8"]) {
+                if ([payload isKindOfClass:NSString.class])
+                    reencoded = [payload dataUsingEncoding:NSUTF8StringEncoding];
+            } else if ([format isEqualToString:@"hex"]) {
+                if ([payload isKindOfClass:NSString.class])
+                    reencoded = FZIUnhex(payload);
+            }
+            if (!reencoded && error && !*error)
+                *error = FZIError(@"Invalid edited nested Base64 payload.");
+            return reencoded ? [reencoded base64EncodedStringWithOptions:0] : nil;
+        }
+        NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:
+            dict.count];
+        for (id key in dict) {
+            id child = FZIRestoreJSONValue(dict[key], depth + 1, error);
+            if (!child) return nil;
+            out[key] = child;
+        }
+        return out;
+    }
+    if ([value isKindOfClass:NSArray.class]) {
+        NSMutableArray *out = [NSMutableArray arrayWithCapacity:[value count]];
+        for (id item in value) {
+            id child = FZIRestoreJSONValue(item, depth + 1, error);
+            if (!child) return nil;
+            [out addObject:child];
+        }
+        return out;
+    }
+    return value;
+}
+
 static NSString *FZIProjectDecodedData(NSData *bytes, FZIBlock *block, NSUInteger depth) {
     if (depth>18 || bytes.length>16*1024*1024) return nil;
     NSPropertyListFormat format=NSPropertyListXMLFormat_v1_0;
@@ -259,7 +395,8 @@ static NSString *FZIProjectDecodedData(NSData *bytes, FZIBlock *block, NSUIntege
     id json=[NSJSONSerialization JSONObjectWithData:bytes
         options:NSJSONReadingFragmentsAllowed error:nil];
     if(json) {
-        NSData *pretty=[NSJSONSerialization dataWithJSONObject:json
+        id readable = FZIProjectJSONValue(json, depth + 1);
+        NSData *pretty=[NSJSONSerialization dataWithJSONObject:readable
             options:NSJSONWritingPrettyPrinted|NSJSONWritingFragmentsAllowed error:nil];
         if(pretty) {
             block.encoding=FZIEncodingJSON;
@@ -316,7 +453,8 @@ static NSString *FZIProjectXML(NSString *source,
                 if(( [embedded isKindOfClass:NSDictionary.class] ||
                      [embedded isKindOfClass:NSArray.class] ) &&
                     ( [trimmed hasPrefix:@"{"] || [trimmed hasPrefix:@"["] )) {
-                    NSData *pretty=[NSJSONSerialization dataWithJSONObject:embedded
+                    id readable = FZIProjectJSONValue(embedded, depth + 1);
+                    NSData *pretty=[NSJSONSerialization dataWithJSONObject:readable
                         options:NSJSONWritingPrettyPrinted error:nil];
                     if(pretty) {
                         block.encoding=FZIEncodingJSONInString;
@@ -328,12 +466,39 @@ static NSString *FZIProjectXML(NSString *source,
                     if(decoded) {
                         block.originalBytes=decoded;
                         value=FZIProjectDecodedData(decoded,block,depth+1);
-                        // If it looks like an ordinary word rather than encoded
-                        // structure, do not replace it with a hex wall.
-                        if(block.encoding==FZIEncodingHex && plain.length<48) {
-                            block.encoding=FZIEncodingIdentity;
-                            value=nil;
-                        }
+                        // Display opaque Base64 as editable HEX too. Short values
+                        // (e.g. 16-byte identifiers) must not be silently hidden.
+                    }
+                }
+            }
+        }
+        // The WhatsApp ABProps cache uses gabp.* keys whose inner entries
+        // are indexed by numeric IDs. Give those entries a discoverable,
+        // display-only label without renaming keys or changing on-disk data.
+        if (value && depth == 0 && [span.tag isEqualToString:@"data"] &&
+            (block.encoding == FZIEncodingPlistBinary ||
+             block.encoding == FZIEncodingPlistXML)) {
+            NSRange prefix = NSMakeRange(0, span.opening.location);
+            NSRange endKey = [source rangeOfString:@"</key>"
+                options:NSBackwardsSearch range:prefix];
+            if (endKey.location != NSNotFound) {
+                NSRange startKey = [source rangeOfString:@"<key>"
+                    options:NSBackwardsSearch
+                    range:NSMakeRange(0, endKey.location)];
+                if (startKey.location != NSNotFound &&
+                    endKey.location >= NSMaxRange(startKey)) {
+                    NSString *name = [source substringWithRange:NSMakeRange(
+                        NSMaxRange(startKey),
+                        endKey.location - NSMaxRange(startKey))];
+                    if ([name hasPrefix:@"gabp."]) {
+                        id decodedPlist = [NSPropertyListSerialization
+                            propertyListWithData:block.originalBytes
+                            options:0 format:NULL error:nil];
+                        NSUInteger count = [decodedPlist isKindOfClass:
+                            NSDictionary.class] ? [decodedPlist count] : 0;
+                        value = [NSString stringWithFormat:
+                            @"<!-- WhatsApp ABProps (gabp), %lu entries with numeric IDs -->\n%@",
+                            (unsigned long)count, value];
                     }
                 }
             }
@@ -343,8 +508,24 @@ static NSString *FZIProjectXML(NSString *source,
         if(value) {
             NSString *head=FZILeadingSpace(originalBody);
             NSString *tail=FZITrailingSpace(originalBody);
-            // No extra per-line indentation: child blocks must retain
-            // the exact text they recorded for lossless round-tripping.
+            // Indent only the visual representation. The exact indentation
+            // introduced here is removed before reconstructing changed data.
+            if (block.encoding != FZIEncodingText) {
+                NSRange previousNewline = [source rangeOfString:@"\n"
+                    options:NSBackwardsSearch
+                    range:NSMakeRange(0, span.opening.location)];
+                NSString *base = @"";
+                if (previousNewline.location != NSNotFound) {
+                    base = [source substringWithRange:NSMakeRange(
+                        NSMaxRange(previousNewline),
+                        span.opening.location - NSMaxRange(previousNewline))];
+                    if ([base rangeOfCharacterFromSet:
+                        [[NSCharacterSet characterSetWithCharactersInString:@" \t"]
+                            invertedSet]].location != NSNotFound) base = @"";
+                }
+                block.displayIndent = [base stringByAppendingString:@"  "];
+                value = FZIIndent(value, block.displayIndent);
+            }
             block.displayBody=[NSString stringWithFormat:@"%@%@%@",head,value,tail];
         } else block.displayBody=originalBody;
         [blocks addObject:block];
@@ -364,6 +545,19 @@ static NSString *FZIWithoutOriginalPadding(NSString *visible, FZIBlock *block) {
         v=[v substringFromIndex:head.length];
     if(tail.length && [v hasSuffix:tail])
         v=[v substringToIndex:v.length-tail.length];
+    if (block.displayIndent.length && [v containsString:@"\n"]) {
+        // Dedent just the exact spacing inserted for this projected block;
+        // JSON and embedded plist values preserve their own inner spacing.
+        NSArray *lines = [v componentsSeparatedByString:@"\n"];
+        NSMutableArray *decoded = [NSMutableArray arrayWithCapacity:lines.count];
+        for (NSUInteger index=0; index<lines.count; index++) {
+            NSString *line = lines[index];
+            if (index && [line hasPrefix:block.displayIndent])
+                line = [line substringFromIndex:block.displayIndent.length];
+            [decoded addObject:line];
+        }
+        v = [decoded componentsJoinedByString:@"\n"];
+    }
     return v;
 }
 
@@ -393,7 +587,9 @@ static NSString *FZIRestoreBlock(NSString *body, FZIBlock *block, NSError **erro
             [content dataUsingEncoding:NSUTF8StringEncoding]
             options:NSJSONReadingFragmentsAllowed error:error];
         if(!json) return nil;
-        bytes=[NSJSONSerialization dataWithJSONObject:json
+        id restored = FZIRestoreJSONValue(json, 0, error);
+        if(!restored) return nil;
+        bytes=[NSJSONSerialization dataWithJSONObject:restored
             options:NSJSONWritingFragmentsAllowed error:error];
         if(!bytes) return nil;
     } else if(block.encoding==FZIEncodingText) {
@@ -503,6 +699,7 @@ static UITextView *FZIFindTextView(UIView *v, NSUInteger depth) {
     return nil;
 }
 
+#if !defined(FILZA_INLINE_CODEC_TESTS)
 @interface FZIActive : NSObject
 @property(nonatomic, weak) UIViewController *controller;
 @property(nonatomic, weak) UITextView *editor;
@@ -510,167 +707,129 @@ static UITextView *FZIFindTextView(UIView *v, NSUInteger depth) {
 @end
 @implementation FZIActive @end
 
+// Native TGFastTextEditViewController / ICTextView integration, as
+// identified in the original Filza Mach-O. No global UIApplication hooks.
 static NSMapTable<UIViewController *,FZIActive *> *gFZIActive;
-static IMP gFZIOrigDidAppear;
-static IMP gFZIOrigText;
-static IMP gFZIOrigSetText;
-static IMP gFZIOrigSendAction;
-static __thread BOOL gFZISaving;
-// Only scalar TLS is allowed under ARC. Retain temporary Objective-C values
-// in the current thread's dictionary for the duration of the native save.
-static NSString *const kFZISaveContextKey = @"FilzaInlineData.NativeSaveContext";
-static BOOL gFZIInternalChange;
+static IMP gFZIOriginalEditorAppear = NULL;
+static IMP gFZIOriginalEditorSave = NULL;
+static IMP gFZIOriginalICText = NULL;
+static NSString *const kFZINativeSaveKey = @"FilzaInlineData.NativeSave";
 
-static void FZIShowError(UIViewController *controller,NSError *error) {
-    UIAlertController *alert=[UIAlertController alertControllerWithTitle:
-        @"Cannot safely save decoded plist"
-        message:error.localizedDescription ?: @"Invalid nested data"
+static void FZIShowError(UIViewController *controller, NSError *error) {
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Invalid embedded plist"
+        message:error.localizedDescription ?: @"Could not restore the original encoded data."
         preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK"
         style:UIAlertActionStyleDefault handler:nil]];
     [controller presentViewController:alert animated:YES completion:nil];
 }
-
+static UITextView *FZINativeEditor(UIViewController *controller) {
+    SEL selector = NSSelectorFromString(@"textEditor");
+    if (![controller respondsToSelector:selector]) return nil;
+    UITextView *editor = ((id (*)(id, SEL))objc_msgSend)(controller, selector);
+    return [editor isKindOfClass:NSClassFromString(@"ICTextView")] ? editor : nil;
+}
 static void FZIProjectInNativeEditor(UIViewController *controller) {
-    if(!FZIIsNativeTextEditor(controller)) return;
-    UITextView *view=FZIFindTextView(controller.view,0);
-    if(!view) return;
-    NSString *text=((id(*)(id,SEL))gFZIOrigText)(view,@selector(text));
-    if(!text.length) return;
-    FZIActive *session=[gFZIActive objectForKey:controller];
-    if(session && session.editor==view) {
-        // Existing editing state, including unsaved changes, is left intact.
+    if (![controller isKindOfClass:NSClassFromString(@"TGFastTextEditViewController")])
+        return;
+    UITextView *view = FZINativeEditor(controller);
+    if (!view || !gFZIOriginalICText) return;
+    NSTextStorage *storage = view.textStorage;
+    // Without the stock HCodeAttributedString, transforming the entire
+    // string could strip syntax colors. Keep the untouched native editor.
+    if (![storage isKindOfClass:NSClassFromString(@"HCodeAttributedString")]) return;
+    if ([gFZIActive objectForKey:controller]) return;
+    NSString *original = ((id (*)(id, SEL))gFZIOriginalICText)(
+        view, @selector(text));
+    FZIProjection *projection = FZIMakeProjection(original);
+    if (!projection) return;
+    FZIActive *session = [FZIActive new];
+    session.controller = controller;
+    session.editor = view;
+    session.projection = projection;
+    NSRange selection = view.selectedRange;
+    [storage beginEditing];
+    [storage replaceCharactersInRange:NSMakeRange(0, storage.length)
+        withString:projection.display];
+    [storage endEditing];
+    [gFZIActive setObject:session forKey:controller];
+    view.selectedRange = NSMakeRange(MIN(selection.location, storage.length), 0);
+    // Invoke the native highlighter on its own NSTextStorage. In contrast to
+    // UITextView.setText:, this keeps Filza's own syntax palette and hooks.
+    SEL highlight = NSSelectorFromString(@"highlight:");
+    if ([storage respondsToSelector:highlight]) {
+        ((void (*)(id, SEL, NSRange))objc_msgSend)(
+            storage, highlight, NSMakeRange(0, storage.length));
+    }
+    NSLog(@"[FilzaInlineData] native syntax-colored projection: %lu source blocks",
+        (unsigned long)projection.blocks.count);
+}
+static id FZINativeICText(id self, SEL selector) {
+    NSDictionary *context = [NSThread currentThread].threadDictionary[kFZINativeSaveKey];
+    if (context[@"editor"] == self && context[@"xml"])
+        return context[@"xml"];
+    return ((id (*)(id, SEL))gFZIOriginalICText)(self, selector);
+}
+static void FZINativeEditorDidAppear(id self, SEL cmd, BOOL animated) {
+    ((void (*)(id, SEL, BOOL))gFZIOriginalEditorAppear)(self, cmd, animated);
+    UIViewController *controller = (UIViewController *)self;
+    FZIProjectInNativeEditor(controller);
+    __weak UIViewController *weakController = controller;
+    for (NSNumber *milliseconds in @[@150, @450]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+            milliseconds.unsignedLongLongValue * NSEC_PER_MSEC),
+            dispatch_get_main_queue(), ^{
+                if (weakController) FZIProjectInNativeEditor(weakController);
+            });
+    }
+}
+static void FZINativeEditorSaveClicked(id self, SEL cmd, id sender) {
+    FZIActive *session = [gFZIActive objectForKey:self];
+    if (!session || !session.editor || !session.projection) {
+        ((void (*)(id, SEL, id))gFZIOriginalEditorSave)(self, cmd, sender);
         return;
     }
-    FZIProjection *projection=FZIMakeProjection(text);
-    if(!projection) return;
-    session=[FZIActive new];
-    session.controller=controller;
-    session.editor=view;
-    session.projection=projection;
-    [gFZIActive setObject:session forKey:controller];
-    NSRange selection=view.selectedRange;
-    gFZIInternalChange=YES;
-    ((void(*)(id,SEL,id))gFZIOrigSetText)(view,@selector(setText:),
-        projection.display);
-    gFZIInternalChange=NO;
-    view.selectedRange=NSMakeRange(MIN(selection.location,view.text.length),0);
-    // Do not send textViewDidChange here: the underlying disk document
-    // is unchanged. The real editor handles user edits normally.
-    NSLog(@"[FilzaInlineData] showing decoded fields inline in %@",
-        NSStringFromClass(controller.class));
-}
-static NSString *FZIHookText(id self,SEL cmd) {
-    if (gFZISaving) {
-        NSDictionary *ctx = [NSThread currentThread].threadDictionary[kFZISaveContextKey];
-        if (ctx[@"editor"] == self && ctx[@"xml"]) return ctx[@"xml"];
+    UITextView *view = session.editor;
+    NSString *visible = ((id (*)(id, SEL))gFZIOriginalICText)(
+        view, @selector(text));
+    NSError *error = nil;
+    NSString *xml = FZIValidateAndRestore(session.projection, visible, &error);
+    if (!xml) {
+        FZIShowError((UIViewController *)self,
+            error ?: FZIError(@"The decoded content could not be safely re-encoded."));
+        return;
     }
-    return ((id(*)(id,SEL))gFZIOrigText)(self,cmd);
-}
-static void FZIHookSetText(id self,SEL cmd,id value) {
-    ((void(*)(id,SEL,id))gFZIOrigSetText)(self,cmd,value);
-}
-
-static void FZIHookDidAppear(id self, SEL cmd, BOOL animated) {
-    ((void(*)(id,SEL,BOOL))gFZIOrigDidAppear)(self,cmd,animated);
-    UIViewController *vc=(UIViewController *)self;
-    if(!FZIIsNativeTextEditor(vc)) return;
-    FZIProjectInNativeEditor(vc);
-    __weak UIViewController *weak=vc;
-    for(NSNumber *delay in @[@150,@450]) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-            delay.unsignedLongLongValue*NSEC_PER_MSEC),
-            dispatch_get_main_queue(),^{ if(weak) FZIProjectInNativeEditor(weak); });
-    }
-}
-
-static BOOL FZIIsSaveAction(UIViewController *controller, SEL selector,id sender) {
-    NSString *name=NSStringFromSelector(selector).lowercaseString;
-    if([name containsString:@"save"] || [name containsString:@"done"] ||
-       [name containsString:@"commit"] || [name containsString:@"finish"])
-        return YES;
-    if([sender isKindOfClass:UIBarButtonItem.class]) {
-        UINavigationItem *navigation=controller.navigationItem;
-        NSString *title = [((UIBarButtonItem *)sender).title lowercaseString] ?: @"";
-        BOOL labeledSave = [title containsString:@"save"] ||
-            [title containsString:@"done"] || [title containsString:@"salvar"];
-        return (sender == navigation.leftBarButtonItem && labeledSave) ||
-            (sender == navigation.rightBarButtonItem && labeledSave);
-    }
-    return NO;
-}
-
-// UIKit dispatches Filza's existing checkmark/save bar action through this
-// path. Only during that exact dispatch does .text return reconstructed XML.
-// The visible UITextView never turns back into Base64 when editing or scrolling.
-static BOOL FZIHookSendAction(id app,SEL cmd,SEL action,id target,id sender,id event) {
-    UIViewController *controller=[target isKindOfClass:UIViewController.class]
-        ? (UIViewController *)target : nil;
-    FZIActive *session=controller ? [gFZIActive objectForKey:controller]:nil;
-    if(!session && [sender isKindOfClass:UIBarButtonItem.class]) {
-        NSEnumerator *controllers=gFZIActive.keyEnumerator;
-        UIViewController *candidate=nil;
-        while((candidate=controllers.nextObject)) {
-            if(!FZIIsNativeTextEditor(candidate)) continue;
-            UINavigationItem *item=candidate.navigationItem;
-            BOOL matching=sender==item.leftBarButtonItem ||
-                sender==item.rightBarButtonItem ||
-                [item.leftBarButtonItems containsObject:sender] ||
-                [item.rightBarButtonItems containsObject:sender];
-            if(matching) {
-                controller=candidate;
-                session=[gFZIActive objectForKey:candidate];
-                break;
-            }
-        }
-    }
-    BOOL shouldRestore=session && FZIIsSaveAction(controller,action,sender);
-    if(!shouldRestore)
-        return ((BOOL(*)(id,SEL,SEL,id,id,id))gFZIOrigSendAction)(
-            app,cmd,action,target,sender,event);
-    UITextView *view=session.editor;
-    if(!view)
-        return ((BOOL(*)(id,SEL,SEL,id,id,id))gFZIOrigSendAction)(
-            app,cmd,action,target,sender,event);
-    NSString *visible=((id(*)(id,SEL))gFZIOrigText)(view,@selector(text));
-    NSError *error=nil;
-    NSString *xml=FZIValidateAndRestore(session.projection,visible,&error);
-    if(!xml) {
-        FZIShowError(controller,error);
-        return YES; // handled: fail closed, do not save invalid Base64.
-    }
-    NSMutableDictionary *threadValues = [NSThread currentThread].threadDictionary;
-    id oldContext = threadValues[kFZISaveContextKey];
-    BOOL oldFlag = gFZISaving;
-    threadValues[kFZISaveContextKey] = @{@"editor":view, @"xml":xml};
-    gFZISaving = YES;
-    BOOL result = NO;
+    NSMutableDictionary *context = NSThread.currentThread.threadDictionary;
+    id previous = context[kFZINativeSaveKey];
+    context[kFZINativeSaveKey] = @{@"editor":view, @"xml":xml};
     @try {
-        result = ((BOOL(*)(id,SEL,SEL,id,id,id))gFZIOrigSendAction)(
-            app,cmd,action,target,sender,event);
+        // Filza's original saveClicked: reads ICTextView.text and validates
+        // the plist. It will now receive correctly re-encoded <data> fields.
+        ((void (*)(id, SEL, id))gFZIOriginalEditorSave)(self, cmd, sender);
     } @finally {
-        if (oldContext) threadValues[kFZISaveContextKey] = oldContext;
-        else [threadValues removeObjectForKey:kFZISaveContextKey];
-        gFZISaving = oldFlag;
+        if (previous) context[kFZINativeSaveKey] = previous;
+        else [context removeObjectForKey:kFZINativeSaveKey];
     }
-    return result;
+}
+__attribute__((constructor)) static void FZIInstall(void) {
+    gFZIActive = [NSMapTable weakToStrongObjectsMapTable];
+    Class controller = NSClassFromString(@"TGFastTextEditViewController");
+    Class editor = NSClassFromString(@"ICTextView");
+    if (!controller || !editor) return;
+    Method appear = class_getInstanceMethod(controller, @selector(viewDidAppear:));
+    Method save = class_getInstanceMethod(controller, @selector(saveClicked:));
+    Method text = class_getInstanceMethod(editor, @selector(text));
+    if (!appear || !save || !text) return;
+    gFZIOriginalEditorAppear = method_getImplementation(appear);
+    gFZIOriginalEditorSave = method_getImplementation(save);
+    gFZIOriginalICText = method_getImplementation(text);
+    class_replaceMethod(editor, @selector(text), (IMP)FZINativeICText,
+        method_getTypeEncoding(text));
+    class_replaceMethod(controller, @selector(viewDidAppear:),
+        (IMP)FZINativeEditorDidAppear, method_getTypeEncoding(appear));
+    class_replaceMethod(controller, @selector(saveClicked:),
+        (IMP)FZINativeEditorSaveClicked, method_getTypeEncoding(save));
 }
 
-__attribute__((constructor)) static void FZIInstall(void) {
-    gFZIActive=[NSMapTable weakToStrongObjectsMapTable];
-    Method didAppear=class_getInstanceMethod(UIViewController.class,
-        @selector(viewDidAppear:));
-    Method getText=class_getInstanceMethod(UITextView.class,@selector(text));
-    Method setText=class_getInstanceMethod(UITextView.class,@selector(setText:));
-    Method dispatch=class_getInstanceMethod(UIApplication.class,
-        @selector(sendAction:to:from:forEvent:));
-    if(!didAppear || !getText || !setText || !dispatch) return;
-    gFZIOrigDidAppear=method_getImplementation(didAppear);
-    gFZIOrigText=method_getImplementation(getText);
-    gFZIOrigSetText=method_getImplementation(setText);
-    gFZIOrigSendAction=method_getImplementation(dispatch);
-    method_setImplementation(didAppear,(IMP)FZIHookDidAppear);
-    method_setImplementation(getText,(IMP)FZIHookText);
-    method_setImplementation(setText,(IMP)FZIHookSetText);
-    method_setImplementation(dispatch,(IMP)FZIHookSendAction);
-}
+#endif // !FILZA_INLINE_CODEC_TESTS
