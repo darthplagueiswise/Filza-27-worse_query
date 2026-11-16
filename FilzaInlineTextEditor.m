@@ -516,8 +516,9 @@ static IMP gFZIOrigText;
 static IMP gFZIOrigSetText;
 static IMP gFZIOrigSendAction;
 static __thread BOOL gFZISaving;
-static __thread UITextView *gFZISavingEditor;
-static __thread NSString *gFZISavingXML;
+// Only scalar TLS is allowed under ARC. Retain temporary Objective-C values
+// in the current thread's dictionary for the duration of the native save.
+static NSString *const kFZISaveContextKey = @"FilzaInlineData.NativeSaveContext";
 static BOOL gFZIInternalChange;
 
 static void FZIShowError(UIViewController *controller,NSError *error) {
@@ -560,8 +561,10 @@ static void FZIProjectInNativeEditor(UIViewController *controller) {
         NSStringFromClass(controller.class));
 }
 static NSString *FZIHookText(id self,SEL cmd) {
-    if(gFZISaving && self==gFZISavingEditor && gFZISavingXML)
-        return gFZISavingXML;
+    if (gFZISaving) {
+        NSDictionary *ctx = [NSThread currentThread].threadDictionary[kFZISaveContextKey];
+        if (ctx[@"editor"] == self && ctx[@"xml"]) return ctx[@"xml"];
+    }
     return ((id(*)(id,SEL))gFZIOrigText)(self,cmd);
 }
 static void FZIHookSetText(id self,SEL cmd,id value) {
@@ -588,10 +591,11 @@ static BOOL FZIIsSaveAction(UIViewController *controller, SEL selector,id sender
         return YES;
     if([sender isKindOfClass:UIBarButtonItem.class]) {
         UINavigationItem *navigation=controller.navigationItem;
-        return sender==navigation.leftBarButtonItem ||
-               sender==navigation.rightBarButtonItem &&
-               ([[((UIBarButtonItem *)sender).title lowercaseString]
-                   containsString:@"save"]);
+        NSString *title = [((UIBarButtonItem *)sender).title lowercaseString] ?: @"";
+        BOOL labeledSave = [title containsString:@"save"] ||
+            [title containsString:@"done"] || [title containsString:@"salvar"];
+        return (sender == navigation.leftBarButtonItem && labeledSave) ||
+            (sender == navigation.rightBarButtonItem && labeledSave);
     }
     return NO;
 }
@@ -635,14 +639,20 @@ static BOOL FZIHookSendAction(id app,SEL cmd,SEL action,id target,id sender,id e
         FZIShowError(controller,error);
         return YES; // handled: fail closed, do not save invalid Base64.
     }
-    gFZISaving=YES;
-    gFZISavingEditor=view;
-    gFZISavingXML=xml;
-    BOOL result=((BOOL(*)(id,SEL,SEL,id,id,id))gFZIOrigSendAction)(
-        app,cmd,action,target,sender,event);
-    gFZISavingXML=nil;
-    gFZISavingEditor=nil;
-    gFZISaving=NO;
+    NSMutableDictionary *threadValues = [NSThread currentThread].threadDictionary;
+    id oldContext = threadValues[kFZISaveContextKey];
+    BOOL oldFlag = gFZISaving;
+    threadValues[kFZISaveContextKey] = @{@"editor":view, @"xml":xml};
+    gFZISaving = YES;
+    BOOL result = NO;
+    @try {
+        result = ((BOOL(*)(id,SEL,SEL,id,id,id))gFZIOrigSendAction)(
+            app,cmd,action,target,sender,event);
+    } @finally {
+        if (oldContext) threadValues[kFZISaveContextKey] = oldContext;
+        else [threadValues removeObjectForKey:kFZISaveContextKey];
+        gFZISaving = oldFlag;
+    }
     return result;
 }
 
