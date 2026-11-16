@@ -679,6 +679,7 @@ static NSString *FZIValidateAndRestore(FZIProjection *projection,
     return xml;
 }
 
+#if !defined(FILZA_INLINE_CODEC_TESTS)
 // Controller identification is scoped to Filza's existing text/code editor.
 // No navigation item or button is added. The plist editor is excluded.
 static BOOL FZIIsNativeTextEditor(UIViewController *controller) {
@@ -699,7 +700,6 @@ static UITextView *FZIFindTextView(UIView *v, NSUInteger depth) {
     return nil;
 }
 
-#if !defined(FILZA_INLINE_CODEC_TESTS)
 @interface FZIActive : NSObject
 @property(nonatomic, weak) UIViewController *controller;
 @property(nonatomic, weak) UITextView *editor;
