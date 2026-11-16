@@ -73,6 +73,8 @@ static NSString *FZIXMLEscape(NSString *text) {
     return s;
 }
 static NSString *FZIXMLUnescape(NSString *text) {
+    // Large configuration plists contain thousands of ordinary values.
+    if([text rangeOfString:@"&"].location==NSNotFound) return text;
     // Decode a leaf <string> with the native plist parser, including numeric entities.
     NSString *xml = [NSString stringWithFormat:
         @"<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><string>%@</string></plist>",
@@ -341,15 +343,8 @@ static NSString *FZIProjectXML(NSString *source,
         if(value) {
             NSString *head=FZILeadingSpace(originalBody);
             NSString *tail=FZITrailingSpace(originalBody);
-            if(head.length && [head containsString:@"\n"] &&
-               (block.encoding==FZIEncodingPlistBinary ||
-                block.encoding==FZIEncodingPlistXML ||
-                block.encoding==FZIEncodingJSON ||
-                block.encoding==FZIEncodingJSONInString)) {
-                NSRange newline=[head rangeOfString:@"\n" options:NSBackwardsSearch];
-                NSString *indent=[head substringFromIndex:newline.location+1];
-                value=FZIIndent(value,indent);
-            }
+            // No extra per-line indentation: child blocks must retain
+            // the exact text they recorded for lossless round-tripping.
             block.displayBody=[NSString stringWithFormat:@"%@%@%@",head,value,tail];
         } else block.displayBody=originalBody;
         [blocks addObject:block];
@@ -408,6 +403,17 @@ static NSString *FZIRestoreBlock(NSString *body, FZIBlock *block, NSError **erro
         if(!bytes && error) *error=FZIError(@"Invalid hexadecimal bytes in decoded field.");
     }
     if(!bytes) return nil;
+    if(block.encoding==FZIEncodingHex && block.originalBytes.length >= 8) {
+        if(!memcmp(block.originalBytes.bytes,"bplist00",8)) {
+            id root=[NSPropertyListSerialization propertyListWithData:bytes
+                options:0 format:NULL error:nil];
+            if(!root) {
+                if(error)*error=FZIError(
+                    @"Edited binary plist bytes are invalid; original data was preserved.");
+                return nil;
+            }
+        }
+    }
     if(block.encoding==FZIEncodingJSONInString)
         return FZIXMLEscape([[NSString alloc] initWithData:bytes
             encoding:NSUTF8StringEncoding]);
