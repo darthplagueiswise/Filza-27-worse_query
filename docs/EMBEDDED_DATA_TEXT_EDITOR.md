@@ -1,76 +1,85 @@
-# Embedded Base64 / Plist / JSON editor — Filza Text Editor
+# Inline decoded plist data in Filza's EXISTING Text Editor
 
-This is a companion to Filza's built-in **Text Editor**. It does not
-modify, replace, or hook the visual plist editor.
+This replaces the earlier Base64 navigation button implementation.
+No new toolbar button, menu, sheet, or secondary editor is installed.
+Filza's original plist editor is intentionally untouched.
 
-## Open
+## What is different
 
-Open an XML plist or JSON file through Filza's Text Editor.
-A Base64 button is added to the editor's navigation bar when the
-running Filza text-editor controller and its text surface/document are found.
-Tap it to browse the parsed document in a searchable, nested tree.
+A plist opened as **Text** is still displayed in Filza's syntax-highlighted
+text editor, with the same visible <plist>, <dict>, <key>, <data>, and
+<string> markup. Instead of Base64 noise between the *existing* <data>
+tags, the content is projected inline as its decoded plist dictionary,
+JSON, readable UTF-8, or hexadecimal data.
 
-For a binary plist, use the Text Editor route: when the controller exposes
-the active file path, the companion reads and edits the original binary plist.
-It does not depend on Filza's broken plist editor.
+For example, the existing markup:
 
-The Text Editor class name and file-path accessors belong to Filza's
-closed-source runtime, so the exact hook/UI behavior must be verified
-on an installed Filza build. The button intentionally does not appear
-on the plist editor.
+    <key>DownloadPolicy</key>
+    <data>YnBsaXN0MDD...</data>
 
-## Nested formats
+is displayed *in that exact part of the document* as something like:
 
-- XML and binary plist (Foundation property-list serializer)
-- JSON (including JSON embedded in plist string values)
-- Base64 in plist strings and JSON strings, including multiple nested levels
-- Binary plist / NSKeyedArchive represented as editable plist nodes
-- DATA nodes, automatically decoded to contained plist, JSON, or UTF-8
-- Unknown binary payloads, editable in hexadecimal
-- Boolean, number, date, string, dictionary and array values
+    <key>DownloadPolicy</key>
+    <data>
+        <dict>
+            <key>$archiver</key>
+            <string>NSKeyedArchiver</string>
+            ...
+        </dict>
+    </data>
 
-For ambiguous strings, choose Decode as Base64 explicitly. Raw/opaque
-bytes can always be edited in hexadecimal, but proprietary compressed or
-encrypted formats are not magically converted to semantic objects.
+The view is a **reversible projection**. It is not a valid disk plist until
+the original Base64 encodings are restored by the save bridge. Ordinary
+text outside the projected fields is left in place, byte-for-byte at the
+string level (subject to the original file encoding and native Filza save).
 
-When a nested value changes, the child is serialized into its original
-field representation, then all parent layers are serialized in turn.
-The outer XML/binary/JSON kind remains unchanged. For unedited child
-data, the original NSData bytes are retained.
+Plists embedded inside <data> are rendered recursively (maximum 18 levels).
+JSON text embedded in <string> fields is pretty-printed in place.
+Unrecognized binary fields display hexadecimal; their original bytes remain
+unchanged if not edited. Foundation's property-list XML serializer may not
+represent some NSKeyedArchive UID data; such data falls back to HEX rather
+than creating an invalid or lossy fake representation.
 
-## Save behavior
+## Saving
 
-**Text input:** The final XML or JSON is applied back to the native
-UITextView and Filza's existing save flow must be used to write the file.
+When the native editor's save/done action is dispatched through UIKit,
+the text getter temporarily supplies a rebuilt XML document:
+- Unedited projected fields recover their **exact original Base64**, including
+  all original line breaks.
+- Edited nested plists are encoded in their original binary/XML form, then
+  all parent layers are encoded back to Base64.
+- Edited embedded JSON is parsed and reserialized.
+- Edited raw bytes are strictly validated as hexadecimal.
+- Before the original Filza save action proceeds, the whole reconstructed
+  plist is validated. Invalid nested data block the save with an error.
 
-**Binary input:** If Filza exposes an actual file path and that path is
-readable/writable with the app's existing privileges, Save writes back to
-that same path. Before writing, it verifies the file has not changed
-since opening and stores an original-byte backup in:
+The *visible editor text* is never replaced with Base64 on-screen.
 
-    Documents/FilzaEmbeddedDataBackups/
+**Runtime caveat:** the original Filza executable is closed-source. This
+bridge uses the native text/code editor UIViewController, UITextView and
+UIKit save-action dispatch points. If a particular Filza build saves from a
+custom internal text buffer, performs asynchronous text reads, or does not
+dispatch its save action via UIApplication, the native save path must be
+investigated and adapted against that exact build. This is NOT proof that
+the file was safely rewritten on-device just because a CI build succeeds.
 
-The saved file is reread and compared against the serialized output.
-If it fails, the editor attempts to restore the original bytes and
-retains the backup. No filesystem access exploit, entitlement change,
-or sandbox-bypass functionality is introduced by this editor.
+Binary plist on-disk preservation also depends on Filza's native save
+implementation; its text editor may save XML rather than binary. The
+original source format must be independently verified on device.
 
-## Important limitations / checks
+## Scope
 
-- A plist reserialized by Foundation may differ in key ordering,
-  indentation, byte offsets or other encoding details despite preserving
-  equivalent values. Do not assume byte-for-byte equality after edits.
-- A binary NSKeyedArchive is browsed as its serialized plist graph
-  (e.g. $objects); this does not instantiate arbitrary archived classes.
-- Plist numbers and JSON values are edited with type validation.
-- Automatic Base64 recognition is conservative to avoid altering
-  ordinary strings; valid ambiguous strings have a manual decode action.
-- The native text editor may use a custom view rather than UITextView.
-  The button is injected only into runtime controller classes that appear
-  to be text/code editors. Verify against Filza's actual text editor.
-- Files requiring unavailable permissions will not become writable
-  simply because this UI exists.
-- A GitHub build verifies compilation, not runtime private APIs.
+The filesystem backend, app-group resolver, plist viewer, file navigation,
+and all existing Filza features remain unchanged. This does not change
+filesystem entitlements or introduce a new write primitive.
 
-No OpenPlist, ProperTree or other project code was copied; this component
-uses Foundation/UIKit to fit the current Objective-C tweak build.
+## Testing
+
+1. Open a copy of a known plist through **Text Editor**, not Plist Editor.
+2. Confirm there is NO Base64 button; decoded content appears inline.
+3. Without editing, save a copy and compare its parsed tree to the source.
+4. Edit an inner numeric/string/boolean field and save; reopen and validate
+   the new nested plist bytes and the unchanged outer fields.
+5. For binary originals, compare initial and final on-disk header (bplist00)
+   and report format drift instead of assuming it stayed binary.
+6. Test malformed embedded data; saving must fail before corrupting the file.
