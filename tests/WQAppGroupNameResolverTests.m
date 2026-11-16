@@ -19,6 +19,46 @@ int main(void)
                                 stringByAppendingString:uuid];
         NSString *shortPath = [@"/var/mobile/Containers/Shared/AppGroup/"
                                 stringByAppendingString:uuid];
+        NSString *systemData = [@"/private/var/containers/Data/System/"
+                                 stringByAppendingString:uuid];
+        NSString *mobileSystemData = [@"/private/var/mobile/Containers/Data/System/"
+                                       stringByAppendingString:uuid];
+        NSString *systemGroup = [@"/private/var/containers/Shared/SystemGroup/"
+                                  stringByAppendingString:uuid];
+        NSString *mobileSystemGroup = [@"/private/var/mobile/Containers/Shared/SystemGroup/"
+                                        stringByAppendingString:uuid];
+        verify(WQFilzaContainerClassForPath(canonical) == 7,
+               @"AppGroup metadata class 7");
+        verify([WQFilzaCanonicalAppGroupPath(systemData) isEqualToString:systemData] &&
+               WQFilzaContainerClassForPath(systemData) == 12,
+               @"system data UUID must resolve as class 12");
+        verify([WQFilzaCanonicalAppGroupPath(mobileSystemData) isEqualToString:mobileSystemData] &&
+               WQFilzaContainerClassForPath(mobileSystemData) == 12,
+               @"mobile System Data alias must resolve as class 12");
+        verify([WQFilzaCanonicalAppGroupPath(systemGroup) isEqualToString:systemGroup] &&
+               WQFilzaContainerClassForPath(systemGroup) == 13,
+               @"system group UUID must resolve as class 13");
+        verify([WQFilzaCanonicalAppGroupPath(mobileSystemGroup) isEqualToString:mobileSystemGroup] &&
+               WQFilzaContainerClassForPath(mobileSystemGroup) == 13,
+               @"mobile SystemGroup alias must resolve as class 13");
+        verify(WQFilzaContainerClassForPath(
+            [@"/var/containers/Data/System/" stringByAppendingString:uuid]) == 12,
+            @"/var/containers system path must be recognized");
+        verify(WQFilzaContainerClassForPath(
+            [@"/var/containers/Shared/SystemGroup/" stringByAppendingString:uuid]) == 13,
+            @"/var/containers system group path must be recognized");
+        verify(WQFilzaCanonicalAppGroupPath(
+            [systemGroup stringByAppendingPathComponent:@"Library"]) == nil,
+            @"nested system group path must retain its real name");
+        verify(WQFilzaCanonicalAppGroupPath(
+            [systemData stringByAppendingPathComponent:@"Library"]) == nil,
+            @"nested system data path must retain its real name");
+        verify(WQFilzaCanonicalAppGroupPath(
+            @"/var/containers/Shared/SystemGroup/not-a-uuid") == nil,
+            @"system group must have UUID basename");
+        verify(WQFilzaCanonicalAppGroupPath(
+            [@"/var/containers/Data/InternalDaemon/" stringByAppendingString:uuid]) == nil,
+            @"internal daemon is not System Data");
         verify([WQFilzaCanonicalAppGroupPath(canonical) isEqualToString:canonical],
                @"direct AppGroup UUID path");
         verify([WQFilzaCanonicalAppGroupPath(shortPath) isEqualToString:canonical],
