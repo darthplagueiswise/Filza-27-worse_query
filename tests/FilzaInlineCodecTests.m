@@ -123,6 +123,84 @@ int main(int argc, const char *argv[]) {
         NSError *badError=nil;
         NSString *invalid=FZIValidateAndRestore(projection,broken,&badError);
         FZIRequire(invalid == nil, @"invalid JSON must be rejected before saving");
+        // Top-level JSON opened in the same native text editor: the Base64
+        // payload is readable, but untouched surrounding JSON stays byte equal.
+        NSData *rootJSONPayload=[NSJSONSerialization dataWithJSONObject:
+            @{@"config":@{@"enabled":@YES, @"version":@3}}
+            options:0 error:nil];
+        NSString *encodedRootJSON=[rootJSONPayload base64EncodedStringWithOptions:0];
+        NSString *rootJSONString=[NSString stringWithFormat:
+            @"{ \"ordinary\" : \"metadata\", \"payload\" : \"%@\", \"untouched\" : 7 }\n",
+            encodedRootJSON];
+        FZIProjection *rootProjection=FZIMakeProjection(rootJSONString);
+        FZIRequire(rootProjection != nil, @"root JSON Base64 projection required");
+        FZIRequire([rootProjection.display containsString:@"\"enabled\""],
+            @"root JSON Base64 must display decoded JSON");
+        FZIRequire([rootProjection.display containsString:@"metadata"],
+            @"ordinary strings must not be mistaken for Base64");
+        NSError *rootError=nil;
+        FZIRequire([[FZIValidateAndRestore(rootProjection,
+            rootProjection.display,&rootError) description] isEqual:rootJSONString],
+            @"untouched JSON must be byte-for-byte identical");
+        NSString *jsonEdited=[rootProjection.display
+            stringByReplacingOccurrencesOfString:@"\"version\" : 3"
+            withString:@"\"version\" : 4"];
+        FZIRequire(![jsonEdited isEqual:rootProjection.display],
+            @"root JSON edit is visible");
+        NSString *restoredJSON=FZIValidateAndRestore(rootProjection,jsonEdited,&rootError);
+        FZIRequire(restoredJSON != nil,
+            rootError.localizedDescription ?: @"root JSON save failure");
+        id restoredJSONRoot=[NSJSONSerialization JSONObjectWithData:
+            [restoredJSON dataUsingEncoding:NSUTF8StringEncoding]
+            options:0 error:&rootError];
+        NSData *restoredJSONBytes=[[NSData alloc]
+            initWithBase64EncodedString:restoredJSONRoot[@"payload"] options:0];
+        id restoredJSONPayload=[NSJSONSerialization JSONObjectWithData:
+            restoredJSONBytes options:0 error:&rootError];
+        FZIRequire([restoredJSONPayload[@"config"][@"version"] isEqual:@4],
+            @"root JSON nested Base64 edit not persisted");
+
+        // URL-safe and unpadded Base64 are valid encodings, not plain text.
+        NSData *urlBytes=[NSData dataWithBytes:
+            "\xfb\xff\xfe\xfa\xf9\xf8\xff\xfe\xfd" length:9];
+        NSString *urlEncoded=[[urlBytes base64EncodedStringWithOptions:0]
+            stringByReplacingOccurrencesOfString:@"+" withString:@"-"];
+        urlEncoded=[urlEncoded stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
+        NSString *urlXML=[NSString stringWithFormat:
+            @"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>url</key><string>%@</string></dict></plist>",
+            urlEncoded];
+        FZIProjection *urlProjection=FZIMakeProjection(urlXML);
+        FZIRequire(urlProjection != nil &&
+            [urlProjection.display containsString:@"FB FF"],
+            @"Base64URL should project as readable HEX");
+        NSString *urlEdited=[urlProjection.display
+            stringByReplacingOccurrencesOfString:@"FB FF"
+            withString:@"FA FF"];
+        NSError *urlError=nil;
+        NSString *urlRestored=FZIValidateAndRestore(urlProjection,urlEdited,&urlError);
+        FZIRequire(urlRestored != nil, urlError.localizedDescription ?: @"Base64URL failed");
+        NSDictionary *urlOutput=FZIReadPlist([urlRestored
+            dataUsingEncoding:NSUTF8StringEncoding]);
+        NSString *savedURL=urlOutput[@"url"];
+        FZIRequire([savedURL containsString:@"_"] || [savedURL containsString:@"-"],
+            @"Base64URL alphabet must be preserved");
+
+        // Unchanged unrelated XML <data> payload must retain its exact bytes
+        // and original Base64 line wrapping, even when another field is edited.
+        NSString *wrappedXML=@"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>"
+            @"<key>unchanged</key><data>\n  AQIDBAUG\n  BwgJCgsM\n</data>"
+            @"<key>modified</key><string>SGVsbG8gV29ybGQh</string>"
+            @"</dict></plist>";
+        FZIProjection *wrappedProjection=FZIMakeProjection(wrappedXML);
+        FZIRequire(wrappedProjection!=nil, @"two independent encoded fields");
+        NSString *wrappedEdit=[wrappedProjection.display
+            stringByReplacingOccurrencesOfString:@"Hello World!"
+            withString:@"Hello Filza!"];
+        NSString *wrappedRestored=FZIValidateAndRestore(wrappedProjection,wrappedEdit,NULL);
+        FZIRequire([wrappedRestored containsString:@"<data>\n  AQIDBAUG\n  BwgJCgsM\n</data>"],
+            @"unchanged Base64 bytes and line wrapping must not be rewritten");
+        FZIRequire([wrappedRestored containsString:@"SGVsbG8gV29ybGQh"]==NO,
+            @"changed Base64 field must be updated");
         NSLog(@"[PASS] native inline codec: 6916 ABProps, nested JSON/Base64, "
               @"short HEX, valid edits, byte-preserving no-op, malformed JSON");
     }
