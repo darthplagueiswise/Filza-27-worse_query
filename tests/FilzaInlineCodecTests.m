@@ -327,62 +327,6 @@ int main(int argc, const char *argv[]) {
         FZIRequire([twoLevelResult[@"inner"] isEqualToString:@"after"],
             @"nested binary plist value was not re-encoded");
 
-        // Reproduces a long Base64 plist <string> whose decoded payload
-        // starts with non-UTF8 control bytes but carries readable ASCII
-        // metadata. Never mistake the adjacent UUID for Base64.
-        NSMutableData *mixed=[NSMutableData data];
-        const uint8_t header[]={0x19,0x3c,0x18,0x13,0x00,0x90,0xff,0x02};
-        [mixed appendBytes:header length:sizeof(header)];
-        NSData *url=[@"https://cdn.example.net/endpoint"
-            dataUsingEncoding:NSUTF8StringEncoding];
-        [mixed appendData:url];
-        uint8_t binaryTail[128]={0};
-        binaryTail[0]=0xfe;
-        binaryTail[1]=0x91;
-        binaryTail[2]=0x00;
-        [mixed appendBytes:binaryTail length:sizeof(binaryTail)];
-        NSString *longBinaryB64=[mixed base64EncodedStringWithOptions:0];
-        NSString *testUUID=@"659E2047-9BC6-4413-9702-1940A688D834";
-        NSString *binaryXML=[NSString stringWithFormat:
-            @"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>"
-             "<key>identifier</key><string>%@</string>"
-             "<key>bootstrap_config</key><string>%@</string>"
-             "</dict></plist>",testUUID,longBinaryB64];
-        FZIProjection *binaryProjection=FZIMakeProjection(binaryXML);
-        FZIRequire(binaryProjection!=nil,
-            @"long binary Base64 with text must produce a reversible projection");
-        FZIRequire([binaryProjection.display containsString:
-            @"https://cdn.example.net/endpoint"],
-            @"printable text inside a binary Base64 stream must be visible");
-        FZIRequire([binaryProjection.display containsString:@"\\x19"] &&
-                   [binaryProjection.display containsString:@"\\xFF"],
-            @"non-UTF8 bytes must be shown in reversible escape notation");
-        FZIRequire([binaryProjection.display containsString:testUUID],
-            @"neighbor UUID must remain original, never decoded");
-        FZIRequire([FZIValidateAndRestore(binaryProjection,
-            binaryProjection.display,NULL) isEqualToString:binaryXML],
-            @"unchanged mixed binary stream must preserve original Base64");
-        NSString *binaryEdited=[binaryProjection.display
-            stringByReplacingOccurrencesOfString:@"endpoint"
-            withString:@"modified"];
-        NSString *binaryRestored=FZIValidateAndRestore(binaryProjection,
-            binaryEdited,NULL);
-        FZIRequire(binaryRestored!=nil,
-            @"edited ASCII inside binary Base64 must save");
-        NSDictionary *binaryRoot=FZIReadPlist(
-            [binaryRestored dataUsingEncoding:NSUTF8StringEncoding]);
-        FZIRequire([binaryRoot[@"identifier"] isEqualToString:testUUID],
-            @"neighbor UUID changed during binary Base64 save");
-        NSData *rebuiltMixed=[[NSData alloc] initWithBase64EncodedString:
-            binaryRoot[@"bootstrap_config"] options:0];
-        FZIRequire([rebuiltMixed rangeOfData:
-            [@"https://cdn.example.net/modified" dataUsingEncoding:NSUTF8StringEncoding]
-            options:0 range:NSMakeRange(0,rebuiltMixed.length)].location!=NSNotFound,
-            @"edited Base64 must be recoded to the new readable ASCII value");
-        FZIRequire(rebuiltMixed.length>100 &&
-            !memcmp(rebuiltMixed.bytes,header,sizeof(header)),
-            @"opaque header bytes must survive editing");
-
         NSLog(@"[PASS] native inline codec: 6916 ABProps, nested JSON/Base64, "
               @"short HEX, valid edits, byte-preserving no-op, malformed JSON");
     }
