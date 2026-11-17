@@ -144,8 +144,12 @@ int main(int argc, const char *argv[]) {
             rootProjection.display,&rootError) description] isEqual:rootJSONString],
             @"untouched JSON must be byte-for-byte identical");
         NSString *jsonEdited=[rootProjection.display
-            stringByReplacingOccurrencesOfString:@"\"version\" : 3"
-            withString:@"\"version\" : 4"];
+            stringByReplacingOccurrencesOfString:@"\"version\":3"
+            withString:@"\"version\":4"];
+        if ([jsonEdited isEqualToString:rootProjection.display])
+            jsonEdited=[rootProjection.display
+                stringByReplacingOccurrencesOfString:@"\"version\" : 3"
+                withString:@"\"version\" : 4"];
         FZIRequire(![jsonEdited isEqual:rootProjection.display],
             @"root JSON edit is visible");
         NSString *restoredJSON=FZIValidateAndRestore(rootProjection,jsonEdited,&rootError);
