@@ -259,6 +259,59 @@ int main(int argc, const char *argv[]) {
         FZIRequire([changedInner isEqualToString:@"Filza"],
                    @"edited Base64 inside XML data JSON was not re-encoded");
 
+        // JSON strings are not XML nodes. In particular a binary plist
+        // decoded into a JSON string contains literal <string>...</string>
+        // tags, and unrelated JSON strings may contain the same markup.
+        NSDictionary *twoLevelPlist=@{@"inner":@"before", @"flag":@1};
+        NSData *twoLevelBinary=FZIPlist(twoLevelPlist,
+            NSPropertyListBinaryFormat_v1_0);
+        NSString *twoLevelB64=[twoLevelBinary base64EncodedStringWithOptions:0];
+        NSDictionary *twoLevelJSON=@{@"plist":twoLevelB64,
+                                    @"literal":@"<string>keep me</string>",
+                                    @"untouched":@"not encoded"};
+        NSData *twoLevelJSONData=[NSJSONSerialization dataWithJSONObject:
+            twoLevelJSON options:0 error:nil];
+        NSString *twoLevelXML=[NSString stringWithFormat:
+            @"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>"
+             "<key>nested</key><data>%@</data></dict></plist>",
+            [twoLevelJSONData base64EncodedStringWithOptions:0]];
+        FZIProjection *twoLevelView=FZIMakeProjection(twoLevelXML);
+        FZIRequire(twoLevelView!=nil,
+            @"JSON containing inner binary plist must form a reversible projection");
+        FZIRequire([twoLevelView.display containsString:@"before"] &&
+                   [twoLevelView.display containsString:@"keep me"],
+            @"recursive binary plist and JSON literal must be readable");
+        NSString *twoLevelNoop=FZIValidateAndRestore(twoLevelView,
+            twoLevelView.display,NULL);
+        FZIRequire([twoLevelNoop isEqualToString:twoLevelXML],
+            @"unchanged recursive document must preserve exact XML and Base64");
+        NSString *twoLevelEdited=[twoLevelView.display
+            stringByReplacingOccurrencesOfString:@"before"
+            withString:@"after"];
+        FZIRequire(![twoLevelEdited isEqualToString:twoLevelView.display],
+            @"nested binary plist edit must change the visible projection");
+        NSError *twoLevelError=nil;
+        NSString *twoLevelOutput=FZIValidateAndRestore(twoLevelView,
+            twoLevelEdited,&twoLevelError);
+        FZIRequire(twoLevelOutput!=nil,
+            twoLevelError.localizedDescription ?: @"nested binary plist failed");
+        NSDictionary *twoLevelOuter=FZIReadPlist(
+            [twoLevelOutput dataUsingEncoding:NSUTF8StringEncoding]);
+        NSDictionary *twoLevelEncodedJSON=[NSJSONSerialization JSONObjectWithData:
+            twoLevelOuter[@"nested"] options:0 error:nil];
+        FZIRequire([twoLevelEncodedJSON[@"literal"] isEqualToString:
+            @"<string>keep me</string>"], @"literal JSON markup must remain unchanged");
+        FZIRequire([twoLevelEncodedJSON[@"untouched"] isEqualToString:
+            @"not encoded"], @"plain JSON sibling must remain unchanged");
+        NSData *twoLevelRebuilt=[[NSData alloc] initWithBase64EncodedString:
+            twoLevelEncodedJSON[@"plist"] options:0];
+        FZIRequire(twoLevelRebuilt.length>=8 &&
+            !memcmp(twoLevelRebuilt.bytes,"bplist00",8),
+            @"edited inner plist must retain original binary format");
+        NSDictionary *twoLevelResult=FZIReadPlist(twoLevelRebuilt);
+        FZIRequire([twoLevelResult[@"inner"] isEqualToString:@"after"],
+            @"nested binary plist value was not re-encoded");
+
         NSLog(@"[PASS] native inline codec: 6916 ABProps, nested JSON/Base64, "
               @"short HEX, valid edits, byte-preserving no-op, malformed JSON");
     }
