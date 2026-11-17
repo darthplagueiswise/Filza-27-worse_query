@@ -223,6 +223,16 @@ int main(int argc, const char *argv[]) {
             [[originalNestedJSON dataUsingEncoding:NSUTF8StringEncoding]
                 base64EncodedStringWithOptions:0]];
         FZIProjection *nestedProjection=FZIMakeProjection(nestedCarrier);
+        if (!nestedProjection || ![nestedProjection.display containsString:@"Hello"]) {
+            NSMutableArray *diagnosticBlocks=[NSMutableArray array];
+            NSString *projected=FZIProjectXML(nestedCarrier,diagnosticBlocks,0);
+            NSError *scanError=nil;
+            NSString *restored=FZIRestoreXML(projected,diagnosticBlocks,&scanError);
+            NSLog(@"[FZI_DEBUG] nested=%@ blocks=%lu restoredEqual=%d err=%@ original=%@",
+                  projected,(unsigned long)diagnosticBlocks.count,
+                  [restored isEqualToString:nestedCarrier],
+                  scanError.localizedDescription,nestedCarrier);
+        }
         FZIRequire(nestedProjection!=nil &&
                    [nestedProjection.display containsString:@"Hello"],
                    @"JSON nested in XML Base64 must decode for editing");
