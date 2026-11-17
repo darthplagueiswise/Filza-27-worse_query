@@ -136,6 +136,8 @@ static id TCReadValue(TCReader *r,uint8_t typ,NSUInteger depth,BOOL inField) {
                 r->invalid=YES;return nil;
             }
             NSData *raw=TCBytes(r,(NSUInteger)n);if(!raw)return nil;
+            // Empty Thrift strings are valid editable text, not opaque data.
+            if(!raw.length)return @{@"text":@""};
             if(raw.length>=16 && depth+1<kTCMaxDepth) {
                 NSDictionary *inner=TCDecodeData(raw,depth+1);
                 if(inner)return @{@"nested_thrift":inner};
