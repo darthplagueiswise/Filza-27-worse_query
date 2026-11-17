@@ -9,12 +9,14 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import "FZIThriftCompact.h"
 
 typedef NS_ENUM(NSUInteger, FZIEncoding) {
     FZIEncodingIdentity = 0,
     FZIEncodingPlistBinary,
     FZIEncodingPlistXML,
     FZIEncodingJSON,
+    FZIEncodingThrift,
     FZIEncodingText,
     FZIEncodingHex,
     FZIEncodingJSONInString
@@ -32,6 +34,7 @@ typedef NS_ENUM(NSUInteger, FZIEncoding) {
 @property(nonatomic) FZIEncoding encoding;
 @property(nonatomic, strong) NSArray<FZIBlock *> *children;
 @property(nonatomic, strong) NSData *originalBytes;
+@property(nonatomic, strong) NSDictionary *thriftTree;
 @property(nonatomic, copy) NSString *displayIndent;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *jsonEncodings;
 @end
@@ -637,6 +640,17 @@ static id FZIProjectJSONValue(id value, NSString *path,
         }
     }
     if (!format) {
+        NSDictionary *thrift=FZICompactThriftDecode(bytes);
+        id view=thrift?FZICompactThriftDisplay(thrift):nil;
+        if(view) {
+            format=@"thrift";
+            decoded=view;
+            records[path]=@{@"format":format, @"original":string,
+                             @"display":view, @"thriftTree":thrift};
+            return view;
+        }
+    }
+    if (!format) {
         NSString *text = FZIReadableUTF8(bytes);
         if (text) {
             format = @"utf8";
@@ -689,6 +703,8 @@ static id FZIRestoreJSONNode(id value, NSString *path,
                 FZIBase64(original) encoding:NSUTF8StringEncoding];
             NSString *rebuilt=FZIJSONRestoreSelective(originalJSON,child,error);
             bytes=[rebuilt dataUsingEncoding:NSUTF8StringEncoding];
+        } else if ([format isEqualToString:@"thrift"]) {
+            bytes=FZICompactThriftEncodeEdited(metadata[@"thriftTree"],value,error);
         } else if ([format isEqualToString:@"utf8"]) {
             if (![value isKindOfClass:NSString.class]) {
                 if (error) *error = FZIError(@"Embedded UTF-8 must remain text.");
@@ -768,6 +784,19 @@ static NSString *FZIProjectDecodedData(NSData *bytes, FZIBlock *block, NSUIntege
             block.encoding=FZIEncodingJSON;
             return [[NSString alloc] initWithData:pretty
                 encoding:NSUTF8StringEncoding];
+        }
+    }
+    NSDictionary *thrift=FZICompactThriftDecode(bytes);
+    id thriftView=thrift?FZICompactThriftDisplay(thrift):nil;
+    if(thriftView) {
+        NSData *json=[NSJSONSerialization dataWithJSONObject:thriftView
+            options:NSJSONWritingPrettyPrinted error:nil];
+        NSString *display=[[NSString alloc] initWithData:json
+            encoding:NSUTF8StringEncoding];
+        if(display.length) {
+            block.thriftTree=thrift;
+            block.encoding=FZIEncodingThrift;
+            return display;
         }
     }
     NSString *utf8=FZIReadableUTF8(bytes);
@@ -927,6 +956,13 @@ static NSString *FZIRestoreBlock(NSString *body, FZIBlock *block, NSError **erro
         NSString *rebuilt=FZIJSONRestoreSelective(originalJSON,restored,error);
         bytes=[rebuilt dataUsingEncoding:NSUTF8StringEncoding];
         if(!bytes) return nil;
+    } else if(block.encoding==FZIEncodingThrift) {
+        id edited=[NSJSONSerialization JSONObjectWithData:
+            [content dataUsingEncoding:NSUTF8StringEncoding]
+            options:NSJSONReadingFragmentsAllowed error:error];
+        if(!edited)return nil;
+        bytes=FZICompactThriftEncodeEdited(block.thriftTree,edited,error);
+        if(!bytes)return nil;
     } else if(block.encoding==FZIEncodingText) {
         bytes=[content dataUsingEncoding:NSUTF8StringEncoding];
     } else if(block.encoding==FZIEncodingHex) {
