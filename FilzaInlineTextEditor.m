@@ -43,6 +43,9 @@ typedef NS_ENUM(NSUInteger, FZIEncoding) {
 @property(nonatomic, strong) NSArray<FZIBlock *> *blocks;
 @property(nonatomic) BOOL rootJSON;
 @property(nonatomic, copy) NSDictionary<NSString *, NSDictionary *> *rootJSONEncodings;
+// Original-source replacement ranges, sorted from highest offset to lowest.
+// UI applies these edits instead of destroying native attributed text.
+@property(nonatomic, copy) NSArray<NSDictionary *> *visualEdits;
 @end
 @implementation FZIProjection @end
 
@@ -166,31 +169,43 @@ static NSData *FZIBase64(NSString *raw) {
     return bytes;
 }
 
-static BOOL FZILooksLikeBase64(NSString *candidate, NSData *bytes) {
-    if (!bytes || !candidate.length) return NO;
-    if ([candidate rangeOfCharacterFromSet:[NSCharacterSet
-         characterSetWithCharactersInString:@"=+/-_"]].location!=NSNotFound)
-        return YES;
-    if (bytes.length>=8 && !memcmp(bytes.bytes,"bplist00",8)) return YES;
-    NSString *trimmed=[[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
-    if (trimmed) {
-        trimmed=[trimmed stringByTrimmingCharactersInSet:
-            NSCharacterSet.whitespaceAndNewlineCharacterSet];
-        if ([trimmed hasPrefix:@"{"] || [trimmed hasPrefix:@"["] ||
-            [trimmed hasPrefix:@"<?xml"] || [trimmed hasPrefix:@"<plist"])
-            return YES;
-        // A Base64-looking word is not sufficient: "metadata", "override",
-        // etc. must remain ordinary strings if their decoded bytes are noise.
-        BOOL readable=YES;
-        for (NSUInteger i=0;i<trimmed.length;i++) {
-            unichar c=[trimmed characterAtIndex:i];
-            if (c<0x20 && c!='\t' && c!='\r' && c!='\n') {
-                readable=NO; break;
-            }
-        }
-        if (readable && candidate.length>=8 && trimmed.length>=3) return YES;
+// A UUID is NOT a Base64URL value. Avoid inferring an encoding from '-'/'_'
+// punctuation, length, or an apparently decodable random binary sequence.
+static BOOL FZIIsUUID(NSString *candidate) {
+    if (![candidate isKindOfClass:NSString.class] || candidate.length!=36)
+        return NO;
+    return [[NSUUID alloc] initWithUUIDString:candidate]!=nil;
+}
+static NSString *FZIReadableUTF8(NSData *bytes) {
+    if (!bytes || !bytes.length) return nil;
+    NSString *text=[[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
+    if (!text || !text.length) return nil;
+    for (NSUInteger i=0;i<text.length;i++) {
+        unichar c=[text characterAtIndex:i];
+        if ((c<0x20 && c!='\t' && c!='\n' && c!='\r') ||
+            (c>=0x7f && c<=0x9f)) return nil;
     }
-    return candidate.length>=16;
+    return text;
+}
+static BOOL FZIHasPlistEnvelope(NSData *bytes);
+static BOOL FZILooksLikeBase64(NSString *candidate, NSData *bytes) {
+    if (!bytes || !candidate.length || FZIIsUUID(candidate)) return NO;
+    if (FZIHasPlistEnvelope(bytes)) return YES;
+    NSString *utf8=FZIReadableUTF8(bytes);
+    if (!utf8) return NO;
+    NSString *trimmed=[utf8 stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!trimmed.length) return NO;
+    if ([trimmed hasPrefix:@"{"] || [trimmed hasPrefix:@"["]) {
+        id object=[NSJSONSerialization JSONObjectWithData:bytes
+            options:NSJSONReadingFragmentsAllowed error:nil];
+        if (object) return YES;
+    }
+    if (candidate.length<7 &&
+        [candidate rangeOfCharacterFromSet:
+         [NSCharacterSet characterSetWithCharactersInString:@"=+/\\-_"]].location
+          == NSNotFound) return NO;
+    return YES;
 }
 static NSString *FZIRewrap64(NSData *data, NSString *original) {
     NSString *s=[data base64EncodedStringWithOptions:0];
@@ -622,16 +637,15 @@ static id FZIProjectJSONValue(id value, NSString *path,
         }
     }
     if (!format) {
-        NSString *text = [[NSString alloc] initWithData:bytes
-            encoding:NSUTF8StringEncoding];
-        if (text && [text rangeOfString:
-            [NSString stringWithFormat:@"%C", (unichar)0]].location == NSNotFound) {
+        NSString *text = FZIReadableUTF8(bytes);
+        if (text) {
             format = @"utf8";
             decoded = text;
         }
     }
-    if (!format) { format = @"hex"; decoded = FZIHex(bytes); }
-    if (!decoded) return value;
+    // Unknown or opaque binary is *not* meaningful text. Preserve its
+    // Base64 spelling unchanged instead of displaying misleading HEX.
+    if (!format || !decoded) return value;
     records[path] = @{@"format":format, @"original":string,
                       @"display":decoded};
     return decoded;
@@ -756,17 +770,14 @@ static NSString *FZIProjectDecodedData(NSData *bytes, FZIBlock *block, NSUIntege
                 encoding:NSUTF8StringEncoding];
         }
     }
-    NSString *utf8=[[NSString alloc] initWithData:bytes
-        encoding:NSUTF8StringEncoding];
-    if(utf8 && [utf8 rangeOfString:
-        [NSString stringWithFormat:@"%C",(unichar)0]].location==NSNotFound &&
-        [utf8 rangeOfString:@"</data>"].location==NSNotFound &&
+    NSString *utf8=FZIReadableUTF8(bytes);
+    if(utf8 && [utf8 rangeOfString:@"</data>"].location==NSNotFound &&
         [utf8 rangeOfString:@"</string>"].location==NSNotFound) {
         block.encoding=FZIEncodingText;
         return utf8;
     }
-    block.encoding=FZIEncodingHex;
-    return FZIHex(bytes);
+    // Leave unrecognized payloads as their original Base64, not HEX.
+    return nil;
 }
 
 static NSString *FZIProjectXML(NSString *source,
@@ -819,8 +830,6 @@ static NSString *FZIProjectXML(NSString *source,
                     if(decoded && FZILooksLikeBase64(plain,decoded)) {
                         block.originalBytes=decoded;
                         value=FZIProjectDecodedData(decoded,block,depth+1);
-                        // Display opaque Base64 as editable HEX too. Short values
-                        // (e.g. 16-byte identifiers) must not be silently hidden.
                     }
                 }
             }
@@ -974,6 +983,58 @@ static NSString *FZIRestoreXML(NSString *visible, NSArray<FZIBlock *> *blocks,
     return out;
 }
 
+// Build and apply a minimal list of source-range display substitutions.
+// Unchanged characters (and their syntax-color attributes in the UI) remain.
+static NSArray<NSDictionary *> *FZISortVisualEdits(NSArray<NSDictionary *> *edits) {
+    return [edits sortedArrayUsingComparator:^NSComparisonResult(id a,id b) {
+        NSUInteger x=[a[@"range"] rangeValue].location;
+        NSUInteger y=[b[@"range"] rangeValue].location;
+        if (x>y) return NSOrderedAscending;
+        if (x<y) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+}
+static NSString *FZIApplyVisualEdits(NSString *original,NSArray<NSDictionary *> *edits) {
+    if (!original || !edits) return nil;
+    NSMutableString *modified=[original mutableCopy];
+    NSUInteger previousStart=original.length;
+    for (NSDictionary *edit in FZISortVisualEdits(edits)) {
+        NSRange range=[edit[@"range"] rangeValue];
+        NSString *replacement=edit[@"text"];
+        if (![replacement isKindOfClass:NSString.class] ||
+            range.location==NSNotFound || NSMaxRange(range)>previousStart ||
+            NSMaxRange(range)>modified.length) return nil;
+        [modified replaceCharactersInRange:range withString:replacement];
+        previousStart=range.location;
+    }
+    return modified;
+}
+static NSString *FZIJSONLiteral(id value) {
+    NSData *encoded=[NSJSONSerialization dataWithJSONObject:@[value]
+        options:NSJSONWritingFragmentsAllowed error:nil];
+    NSString *array=[[NSString alloc] initWithData:encoded
+        encoding:NSUTF8StringEncoding];
+    return array.length>=2 ? [array substringWithRange:
+        NSMakeRange(1,array.length-2)] : nil;
+}
+static NSArray<NSDictionary *> *FZIOriginalJSONDisplayEdits(
+    NSString *original, NSDictionary<NSString *,NSDictionary *> *metadata) {
+    NSMutableDictionary<NSString *,NSValue *> *ranges=[NSMutableDictionary dictionary];
+    NSUInteger pos=0;
+    if (!FZIJSONIndexValues(original,&pos,@"",ranges,0)) return nil;
+    FZIJSONSkipSpace(original,&pos);
+    if (pos!=original.length) return nil;
+    NSMutableArray *edits=[NSMutableArray array];
+    for (NSString *path in metadata) {
+        NSValue *range=ranges[path];
+        if (!range) continue; // nested paths live inside a containing Base64 token
+        NSString *token=FZIJSONLiteral(metadata[path][@"display"]);
+        if (!token) return nil;
+        [edits addObject:@{@"range":range,@"text":token}];
+    }
+    return FZISortVisualEdits(edits);
+}
+
 static FZIProjection *FZIMakeProjection(NSString *text) {
     if (!text || text.length>36*1024*1024) return nil;
     NSData *bytes=[text dataUsingEncoding:NSUTF8StringEncoding];
@@ -988,6 +1049,18 @@ static FZIProjection *FZIMakeProjection(NSString *text) {
         projection.display=FZIProjectXML(text,blocks,0);
         if ([projection.display isEqualToString:text]) return nil;
         projection.blocks=blocks;
+        NSArray<FZISpan *> *spans=FZISpans(text,nil);
+        if (spans.count!=blocks.count) return nil;
+        NSMutableArray<NSDictionary *> *edits=[NSMutableArray array];
+        for (NSUInteger i=0;i<spans.count;i++) {
+            FZIBlock *block=blocks[i];
+            if (![block.displayBody isEqualToString:block.originalBody])
+                [edits addObject:@{@"range":[NSValue valueWithRange:spans[i].body],
+                                  @"text":block.displayBody}];
+        }
+        projection.visualEdits=FZISortVisualEdits(edits);
+        if (![[FZIApplyVisualEdits(text,projection.visualEdits) description]
+                    isEqualToString:projection.display]) return nil;
         NSError *error=nil;
         NSString *roundtrip=FZIRestoreXML(projection.display,blocks,&error);
         return [roundtrip isEqualToString:text] ? projection : nil;
@@ -1002,15 +1075,15 @@ static FZIProjection *FZIMakeProjection(NSString *text) {
     NSMutableDictionary *records=[NSMutableDictionary dictionary];
     id readable=FZIProjectJSONValue(json,@"",records,0);
     if (!records.count) return nil;
-    NSData *display=[NSJSONSerialization dataWithJSONObject:readable
-        options:NSJSONWritingPrettyPrinted|NSJSONWritingFragmentsAllowed
-        error:nil];
-    if (!display) return nil;
-    projection.display=[[NSString alloc] initWithData:display
-        encoding:NSUTF8StringEncoding];
+    // Keep the original JSON formatting and only replace encoded string
+    // tokens in the view; do not reformat the complete file.
+    projection.visualEdits=FZIOriginalJSONDisplayEdits(text,records);
+    if (!projection.visualEdits.count) return nil;
+    projection.display=FZIApplyVisualEdits(text,projection.visualEdits);
     projection.rootJSON=YES;
     projection.rootJSONEncodings=[records copy];
-    if (!projection.display.length) return nil;
+    if (!projection.display.length || [projection.display isEqualToString:text])
+        return nil;
     return projection;
 }
 
@@ -1072,6 +1145,8 @@ static UITextView *FZIFindTextView(UIView *v, NSUInteger depth) {
 // Native TGFastTextEditViewController / ICTextView integration, as
 // identified in the original Filza Mach-O. No global UIApplication hooks.
 static NSMapTable<UIViewController *,FZIActive *> *gFZIActive;
+static NSMapTable<UIViewController *,NSNumber *> *gFZIPending;
+static NSMapTable<UIViewController *,NSNumber *> *gFZIAttempted;
 static IMP gFZIOriginalEditorAppear = NULL;
 static IMP gFZIOriginalEditorSave = NULL;
 static IMP gFZIOriginalICText = NULL;
@@ -1092,40 +1167,88 @@ static UITextView *FZINativeEditor(UIViewController *controller) {
     UITextView *editor = ((id (*)(id, SEL))objc_msgSend)(controller, selector);
     return [editor isKindOfClass:NSClassFromString(@"ICTextView")] ? editor : nil;
 }
+// Foundation-only decoding is performed on a background queue. Native
+// attributed text and UIKit are accessed exclusively on the main thread.
 static void FZIProjectInNativeEditor(UIViewController *controller) {
+    if (![NSThread isMainThread]) return;
     if (![controller isKindOfClass:NSClassFromString(@"TGFastTextEditViewController")])
         return;
-    UITextView *view = FZINativeEditor(controller);
+    if ([gFZIActive objectForKey:controller] ||
+        [gFZIPending objectForKey:controller] ||
+        [gFZIAttempted objectForKey:controller]) return;
+    UITextView *view=FZINativeEditor(controller);
     if (!view || !gFZIOriginalICText) return;
-    NSTextStorage *storage = view.textStorage;
-    // Without the stock HCodeAttributedString, transforming the entire
-    // string could strip syntax colors. Keep the untouched native editor.
-    if (![storage isKindOfClass:NSClassFromString(@"HCodeAttributedString")]) return;
-    if ([gFZIActive objectForKey:controller]) return;
-    NSString *original = ((id (*)(id, SEL))gFZIOriginalICText)(
-        view, @selector(text));
-    FZIProjection *projection = FZIMakeProjection(original);
-    if (!projection) return;
-    FZIActive *session = [FZIActive new];
-    session.controller = controller;
-    session.editor = view;
-    session.projection = projection;
-    NSRange selection = view.selectedRange;
-    [storage beginEditing];
-    [storage replaceCharactersInRange:NSMakeRange(0, storage.length)
-        withString:projection.display];
-    [storage endEditing];
-    [gFZIActive setObject:session forKey:controller];
-    view.selectedRange = NSMakeRange(MIN(selection.location, storage.length), 0);
-    // Invoke the native highlighter on its own NSTextStorage. In contrast to
-    // UITextView.setText:, this keeps Filza's own syntax palette and hooks.
-    SEL highlight = NSSelectorFromString(@"highlight:");
-    if ([storage respondsToSelector:highlight]) {
-        ((void (*)(id, SEL, NSRange))objc_msgSend)(
-            storage, highlight, NSMakeRange(0, storage.length));
-    }
-    NSLog(@"[FilzaInlineData] native syntax-colored projection: %lu source blocks",
-        (unsigned long)projection.blocks.count);
+    NSTextStorage *storage=view.textStorage;
+    if (![storage isKindOfClass:NSClassFromString(@"HCodeAttributedString")])
+        return;
+    NSString *original=((id (*)(id,SEL))gFZIOriginalICText)(view,@selector(text));
+    if (!original.length || original.length>36*1024*1024) return;
+    [gFZIPending setObject:@YES forKey:controller];
+    [gFZIAttempted setObject:@YES forKey:controller];
+    __weak UIViewController *weakController=controller;
+    __weak UITextView *weakView=view;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
+        @autoreleasepool {
+            FZIProjection *projection=FZIMakeProjection(original);
+            // Excessive expansion cannot be rendered safely on the iPhone.
+            if (projection.display.length>12*1024*1024 ||
+                projection.visualEdits.count>1500) projection=nil;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIViewController *alive=weakController;
+                UITextView *editor=weakView;
+                if (alive) [gFZIPending removeObjectForKey:alive];
+                if (!alive || !editor || !projection ||
+                    [gFZIActive objectForKey:alive]) return;
+                NSTextStorage *native=editor.textStorage;
+                NSString *current=((id (*)(id,SEL))gFZIOriginalICText)(
+                    editor,@selector(text));
+                // The user may have started editing during background parsing.
+                // Never overwrite those changes with an older snapshot.
+                if (![current isEqualToString:original] ||
+                    ![native.string isEqualToString:original]) return;
+                NSArray *edits=projection.visualEdits;
+                if (!edits.count) return;
+                NSRange selected=editor.selectedRange;
+                // Adjust cursor position without touching the content of
+                // syntax-colored regions outside changed Base64 fields.
+                NSUInteger location=MIN(selected.location,original.length);
+                for (NSDictionary *edit in [edits reverseObjectEnumerator]) {
+                    NSRange range=[edit[@"range"] rangeValue];
+                    NSUInteger length=[edit[@"text"] length];
+                    if (NSMaxRange(range)<=location) {
+                        NSInteger delta=(NSInteger)length-(NSInteger)range.length;
+                        location=(NSUInteger)MAX(0,(NSInteger)location+delta);
+                    } else if (range.location<location) location=range.location;
+                }
+                [native beginEditing];
+                @try {
+                    // Every replacement targets a single encoded value.
+                    // Other text and its original HCodeAttributedString
+                    // color attributes remain unchanged.
+                    for (NSDictionary *edit in edits)
+                        [native replaceCharactersInRange:
+                            [edit[@"range"] rangeValue] withString:edit[@"text"]];
+                } @finally {
+                    [native endEditing];
+                }
+                if (![native.string isEqualToString:projection.display]) {
+                    NSLog(@"[FilzaInlineData] unexpected native storage state");
+                    return;
+                }
+                FZIActive *session=[FZIActive new];
+                session.controller=alive;
+                session.editor=editor;
+                session.projection=projection;
+                [gFZIActive setObject:session forKey:alive];
+                editor.selectedRange=NSMakeRange(
+                    MIN(location,native.length),0);
+                // No whole-document replaceCharactersInRange and NO
+                // highlight: over the complete file; both stalled the UI.
+                NSLog(@"[FilzaInlineData] projected %lu fields selectively",
+                      (unsigned long)edits.count);
+            });
+        }
+    });
 }
 static id FZINativeICText(id self, SEL selector) {
     NSDictionary *context = [NSThread currentThread].threadDictionary[kFZINativeSaveKey];
@@ -1134,17 +1257,14 @@ static id FZINativeICText(id self, SEL selector) {
     return ((id (*)(id, SEL))gFZIOriginalICText)(self, selector);
 }
 static void FZINativeEditorDidAppear(id self, SEL cmd, BOOL animated) {
-    ((void (*)(id, SEL, BOOL))gFZIOriginalEditorAppear)(self, cmd, animated);
-    UIViewController *controller = (UIViewController *)self;
-    FZIProjectInNativeEditor(controller);
-    __weak UIViewController *weakController = controller;
-    for (NSNumber *milliseconds in @[@150, @450]) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-            milliseconds.unsignedLongLongValue * NSEC_PER_MSEC),
-            dispatch_get_main_queue(), ^{
-                if (weakController) FZIProjectInNativeEditor(weakController);
-            });
-    }
+    ((void (*)(id,SEL,BOOL))gFZIOriginalEditorAppear)(self,cmd,animated);
+    // Defer the snapshot to the next runloop; user sees the ORIGINAL,
+    // syntax-colored file while the codec works off the main thread.
+    __weak UIViewController *weakController=(UIViewController *)self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *alive=weakController;
+        if (alive) FZIProjectInNativeEditor(alive);
+    });
 }
 static void FZINativeEditorSaveClicked(id self, SEL cmd, id sender) {
     FZIActive *session = [gFZIActive objectForKey:self];
@@ -1176,6 +1296,8 @@ static void FZINativeEditorSaveClicked(id self, SEL cmd, id sender) {
 }
 __attribute__((constructor)) static void FZIInstall(void) {
     gFZIActive = [NSMapTable weakToStrongObjectsMapTable];
+    gFZIPending = [NSMapTable weakToStrongObjectsMapTable];
+    gFZIAttempted = [NSMapTable weakToStrongObjectsMapTable];
     Class controller = NSClassFromString(@"TGFastTextEditViewController");
     Class editor = NSClassFromString(@"ICTextView");
     if (!controller || !editor) return;

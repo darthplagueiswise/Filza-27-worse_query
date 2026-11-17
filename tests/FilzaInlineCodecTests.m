@@ -65,8 +65,14 @@ int main(int argc, const char *argv[]) {
             @"nested Base64 JSON must appear directly as decoded JSON");
         FZIRequire([projection.display rangeOfString:@"__filza_inline_base64_v1__"].location == NSNotFound,
             @"transport metadata must never appear in the user-visible editor");
-        FZIRequire([projection.display containsString:@"00 01 02 03"],
-            @"short opaque Base64 must decode to HEX");
+        FZIRequire([projection.display rangeOfString:@"00 01 02 03"].location==NSNotFound,
+            @"opaque binary must not appear as misleading HEX");
+        FZIRequire([projection.display containsString:identifier],
+            @"opaque Base64 without a readable payload must stay unchanged");
+        FZIRequire(projection.visualEdits.count>0 &&
+            [FZIApplyVisualEdits(source,projection.visualEdits)
+                isEqualToString:projection.display],
+            @"visual edits must exactly reproduce the reversible projection");
         NSError *error=nil;
         NSString *identical = FZIValidateAndRestore(
             projection, projection.display, &error);
@@ -77,8 +83,6 @@ int main(int argc, const char *argv[]) {
             withString:@"EDITED"];
         edited = [edited stringByReplacingOccurrencesOfString:@"Sample"
             withString:@"Changed"];
-        edited = [edited stringByReplacingOccurrencesOfString:@"\"opaque\" : \"00 01"
-            withString:@"\"opaque\" : \"FF 01"];
         FZIRequire(![edited isEqualToString:projection.display],
             @"test must actually modify the visible projection");
         error=nil;
@@ -103,11 +107,8 @@ int main(int argc, const char *argv[]) {
             finalAdmc[0][@"nested"] options:0];
         NSDictionary *nestedDecoded=[NSJSONSerialization JSONObjectWithData:
             nestedData options:0 error:&error];
-        NSData *opaqueModified=[[NSData alloc] initWithBase64EncodedString:
-            nestedDecoded[@"opaque"] options:0];
-        FZIRequire(opaqueModified.length == 16 &&
-            ((const unsigned char *)opaqueModified.bytes)[0] == 0xFF,
-            @"edited HEX inside nested JSON/Base64 did not round-trip");
+        FZIRequire([nestedDecoded[@"opaque"] isEqualToString:identifier],
+            @"untouched opaque binary Base64 inside JSON must stay byte-identical");
         FZIRequire([finalRoot[@"OwnCountryCode"] isEqualToString:identifier],
             @"untouched Base64 value must retain its original representation");
         NSData *backToBinary = FZIPlist(finalRoot,
@@ -169,32 +170,52 @@ int main(int argc, const char *argv[]) {
             @"the JSON suffix (spaces/newline) must remain byte-identical");
 
 
-        // URL-safe and unpadded Base64 are valid encodings, not plain text.
-        NSData *urlBytes=[NSData dataWithBytes:
-            "\xfb\xff\xfe\xfa\xf9\xf8\xff\xfe\xfd" length:9];
-        NSString *urlEncoded=[[urlBytes base64EncodedStringWithOptions:0]
-            stringByReplacingOccurrencesOfString:@"+" withString:@"-"];
-        urlEncoded=[urlEncoded stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
+        // Base64URL that decodes to readable Unicode stays URL-safe and
+        // unpadded. Opaque random bytes are never shown as HEX.
+        NSString *urlEncoded=@"8J-YgA"; // UTF-8 😀 in unpadded Base64URL
         NSString *urlXML=[NSString stringWithFormat:
-            @"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>url</key><string>%@</string></dict></plist>",
-            urlEncoded];
+            @"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>"
+             "<key>url</key><string>%@</string></dict></plist>",urlEncoded];
         FZIProjection *urlProjection=FZIMakeProjection(urlXML);
-        FZIRequire(urlProjection != nil &&
-            [urlProjection.display containsString:@"FB FF"],
-            @"Base64URL should project as readable HEX");
+        FZIRequire(urlProjection!=nil &&
+            [urlProjection.display containsString:@"😀"],
+            @"readable UTF-8 in Base64URL should appear as text");
         NSString *urlEdited=[urlProjection.display
-            stringByReplacingOccurrencesOfString:@"FB FF"
-            withString:@"FA FF"];
-        NSError *urlError=nil;
-        NSString *urlRestored=FZIValidateAndRestore(urlProjection,urlEdited,&urlError);
-        FZIRequire(urlRestored != nil, urlError.localizedDescription ?: @"Base64URL failed");
+            stringByReplacingOccurrencesOfString:@"😀" withString:@"👋"];
+        NSString *urlRestored=FZIValidateAndRestore(urlProjection,urlEdited,NULL);
+        FZIRequire(urlRestored!=nil, @"Base64URL edit must save");
         NSDictionary *urlOutput=FZIReadPlist([urlRestored
             dataUsingEncoding:NSUTF8StringEncoding]);
         NSString *savedURL=urlOutput[@"url"];
-        FZIRequire([savedURL containsString:@"_"] || [savedURL containsString:@"-"],
-            @"Base64URL alphabet must be preserved");
-        FZIRequire([savedURL rangeOfString:@"="].location==NSNotFound,
-            @"unmodified Base64URL padding style must be retained");
+        FZIRequire([savedURL hasPrefix:@"8J-"] &&
+            [savedURL rangeOfString:@"="].location==NSNotFound,
+            @"edited Base64URL must retain its alphabet and padding style");
+
+        NSString *uid1=@"659E2047-9BC6-4413-9702-1940A688D834";
+        NSString *uid2=@"7A36FB3D-DA2B-4883-ADB1-DC89E09AF507";
+        NSString *uidXML=[NSString stringWithFormat:
+            @"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>"
+             "<key>first</key><string>%@</string>"
+             "<key>second</key><string>%@</string>"
+             "<key>encodedWord</key><string>SGVsbG8=</string>"
+             "<key>notEncoded</key><string>metadata</string>"
+             "</dict></plist>",uid1,uid2];
+        FZIProjection *uidProjection=FZIMakeProjection(uidXML);
+        FZIRequire(uidProjection!=nil,@"Base64 word should decode beside UUIDs");
+        FZIRequire([uidProjection.display containsString:uid1] &&
+                   [uidProjection.display containsString:uid2],
+            @"UUIDs must never be decoded or displayed as binary");
+        FZIRequire([uidProjection.display containsString:
+            @"<string>Hello</string>"],@"Base64 word must decode to readable text");
+        FZIRequire([uidProjection.display containsString:
+            @"<string>metadata</string>"],@"ordinary text must stay unchanged");
+        FZIRequire(uidProjection.visualEdits.count==1 &&
+            [FZIApplyVisualEdits(uidXML,uidProjection.visualEdits)
+                isEqualToString:uidProjection.display],
+            @"only one encoded field should change in the colored text view");
+        FZIRequire([FZIValidateAndRestore(uidProjection,
+            uidProjection.display,NULL) isEqualToString:uidXML],
+            @"UUID and original Base64 must be lossless when saving without edits");
 
         // Unchanged unrelated XML <data> payload must retain its exact bytes
         // and original Base64 line wrapping, even when another field is edited.
@@ -223,16 +244,6 @@ int main(int argc, const char *argv[]) {
             [[originalNestedJSON dataUsingEncoding:NSUTF8StringEncoding]
                 base64EncodedStringWithOptions:0]];
         FZIProjection *nestedProjection=FZIMakeProjection(nestedCarrier);
-        if (!nestedProjection || ![nestedProjection.display containsString:@"Hello"]) {
-            NSMutableArray *diagnosticBlocks=[NSMutableArray array];
-            NSString *projected=FZIProjectXML(nestedCarrier,diagnosticBlocks,0);
-            NSError *scanError=nil;
-            NSString *restored=FZIRestoreXML(projected,diagnosticBlocks,&scanError);
-            NSLog(@"[FZI_DEBUG] nested=%@ blocks=%lu restoredEqual=%d err=%@ original=%@",
-                  projected,(unsigned long)diagnosticBlocks.count,
-                  [restored isEqualToString:nestedCarrier],
-                  scanError.localizedDescription,nestedCarrier);
-        }
         FZIRequire(nestedProjection!=nil &&
                    [nestedProjection.display containsString:@"Hello"],
                    @"JSON nested in XML Base64 must decode for editing");

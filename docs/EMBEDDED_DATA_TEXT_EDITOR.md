@@ -95,3 +95,13 @@ these tests before Theos compilation and packaging.
 No third-party parser code has been copied; this is a native Objective-C
 integration with the stock Filza editor. A successful CI build proves
 compilation and codec tests, **not** visual correctness on a physical iPhone.
+
+## iOS editor freeze and UUID regression (2026-11-16)
+
+- UUID strings like `659E2047-9BC6-4413-9702-1940A688D834` are never Base64.
+- Binary payloads without known readable content remain in their original Base64 transport: there is **no implicit HEX view**.
+- Base64 words that decode to real UTF-8 and recognized JSON or plist containers still display inline; parent Base64 is restored only on edited values.
+- The editor retains the native `HCodeAttributedString` colored content. Only Base64 leaf *bodies* are replaced with source-range edits; other colored XML tags/keys are never replaced.
+- The serializer runs on a background queue. The main thread only performs individual text-storage edits and does not highlight the entire document.
+- Visual projection is skipped when it exceeds a resource safety limit instead of freezing; the untouched original editor remains available.
+- iPhone runtime testing is still needed to confirm TextKit drawing and responsiveness on real large plists.
