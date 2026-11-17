@@ -327,6 +327,76 @@ int main(int argc, const char *argv[]) {
         FZIRequire([twoLevelResult[@"inner"] isEqualToString:@"after"],
             @"nested binary plist value was not re-encoded");
 
+        // This fixture was generated independently with Python Apache Thrift.
+        // It includes list-of-struct, signed varint, nested binary Thrift,
+        // map and bool. It contains no private user data.
+        NSString *thriftFixture=@"GSwYE2NsaWVudF9pcF9kaXNjb3ZlcnkVkE4YIRgcaHR0cHM6Ly9leGFtcGxlLm5ldC9lbmRwb2ludBUOAAAYDWNsaWVudF91cGxvYWQRABsBhAVsaW1pdEIA";
+        NSData *thriftBytes=[[NSData alloc] initWithBase64EncodedString:
+            thriftFixture options:0];
+        NSDictionary *typedThrift=FZICompactThriftDecode(thriftBytes);
+        FZIRequire(typedThrift!=nil,@"Thrift Compact fixture must fully decode");
+        FZIRequire([FZICompactThriftEncode(typedThrift)
+            isEqualToData:thriftBytes],@"Thrift Compact must re-encode byte-exact");
+        NSDictionary *thriftView=FZICompactThriftDisplay(typedThrift);
+        FZIRequire([thriftView isKindOfClass:NSDictionary.class],
+            @"Thrift projection must be an editable JSON object");
+        NSDictionary *thriftTask=thriftView[@"field_1"][0];
+        FZIRequire([thriftTask[@"field_1"] isEqualToString:
+            @"client_ip_discovery"],@"Thrift nested task name must be readable");
+        FZIRequire([thriftTask[@"field_2"] isEqual:@5000],
+            @"Thrift typed integer must be readable");
+        FZIRequire([thriftTask[@"field_3"][@"field_1"] isEqualToString:
+            @"https://example.net/endpoint"],@"nested Thrift binary must be readable");
+        NSData *mutableData=[NSJSONSerialization dataWithJSONObject:thriftView
+            options:0 error:nil];
+        NSMutableDictionary *editableThrift=[NSJSONSerialization
+            JSONObjectWithData:mutableData options:NSJSONReadingMutableContainers
+            error:nil];
+        editableThrift[@"field_1"][0][@"field_2"]=@6000;
+        NSError *thriftError=nil;
+        NSData *reencodedThrift=FZICompactThriftEncodeEdited(typedThrift,
+            editableThrift,&thriftError);
+        FZIRequire(reencodedThrift!=nil,
+            thriftError.localizedDescription ?: @"Thrift edit must reencode");
+        NSDictionary *parsedAfter=FZICompactThriftDisplay(
+            FZICompactThriftDecode(reencodedThrift));
+        FZIRequire([parsedAfter[@"field_1"][0][@"field_2"] isEqual:@6000],
+            @"edited Thrift integer was not saved");
+        FZIRequire([parsedAfter[@"field_1"][0][@"field_3"]
+            isEqual:thriftTask[@"field_3"]],
+            @"untouched nested Thrift structure must remain unchanged");
+        NSString *thriftXML=[NSString stringWithFormat:
+            @"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>"
+             "<key>bootstrap_config</key><string>%@</string>"
+             "<key>FBLoginUUID</key><string>659E2047-9BC6-4413-9702-1940A688D834</string>"
+             "</dict></plist>",thriftFixture];
+        FZIProjection *thriftProjected=FZIMakeProjection(thriftXML);
+        FZIRequire(thriftProjected!=nil &&
+            [thriftProjected.display containsString:@"client_ip_discovery"],
+            @"Thrift Compact must be rendered by native inline editor");
+        FZIRequire([thriftProjected.display containsString:
+            @"659E2047-9BC6-4413-9702-1940A688D834"],
+            @"UUID adjacent to Thrift must stay original");
+        FZIRequire([FZIValidateAndRestore(thriftProjected,
+            thriftProjected.display,NULL) isEqualToString:thriftXML],
+            @"no-op Thrift must preserve original Base64 and plist text");
+        NSString *thriftEdit=[thriftProjected.display
+            stringByReplacingOccurrencesOfString:@"5000" withString:@"6000"];
+        NSString *savedThrift=FZIValidateAndRestore(thriftProjected,
+            thriftEdit,&thriftError);
+        FZIRequire(savedThrift!=nil,
+            thriftError.localizedDescription ?: @"Thrift edited XML must restore");
+        NSDictionary *savedThriftPlist=FZIReadPlist(
+            [savedThrift dataUsingEncoding:NSUTF8StringEncoding]);
+        NSData *recoveredThrift=[[NSData alloc] initWithBase64EncodedString:
+            savedThriftPlist[@"bootstrap_config"] options:0];
+        NSDictionary *recoveredView=FZICompactThriftDisplay(
+            FZICompactThriftDecode(recoveredThrift));
+        FZIRequire([recoveredView[@"field_1"][0][@"field_2"] isEqual:@6000],
+            @"modified Thrift field was not recoded to Base64");
+        FZIRequire([savedThriftPlist[@"FBLoginUUID"] isEqualToString:
+            @"659E2047-9BC6-4413-9702-1940A688D834"],
+            @"neighboring UUID must not change after Thrift Save");
         NSLog(@"[PASS] native inline codec: 6916 ABProps, nested JSON/Base64, "
               @"short HEX, valid edits, byte-preserving no-op, malformed JSON");
     }
