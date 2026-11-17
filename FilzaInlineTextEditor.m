@@ -313,6 +313,190 @@ static NSString *FZIJSONPath(NSString *parent, NSString *member) {
         withString:@"~1"];
     return [parent stringByAppendingFormat:@"/%@", escaped];
 }
+// Build a source-range index for JSON values. The editor may pretty-print
+// the *view*, but saving modifies only the original scalar token ranges.
+// This avoids serializing untouched whitespace, key order and Base64 siblings.
+static void FZIJSONSkipSpace(NSString *text, NSUInteger *pos) {
+    NSCharacterSet *space=NSCharacterSet.whitespaceAndNewlineCharacterSet;
+    while (*pos<text.length && [space characterIsMember:[text characterAtIndex:*pos]])
+        (*pos)++;
+}
+static NSString *FZIJSONReadQuoted(NSString *text, NSUInteger *pos,
+                                   NSRange *fullRange) {
+    NSUInteger start=*pos;
+    if (start>=text.length || [text characterAtIndex:start]!='"') return nil;
+    (*pos)++;
+    BOOL escape=NO;
+    while (*pos<text.length) {
+        unichar ch=[text characterAtIndex:(*pos)++];
+        if (escape) { escape=NO; continue; }
+        if (ch=='\\') { escape=YES; continue; }
+        if (ch=='"') {
+            NSRange span=NSMakeRange(start,*pos-start);
+            if (fullRange) *fullRange=span;
+            NSString *literal=[text substringWithRange:span];
+            if ([literal rangeOfString:@"\\"].location==NSNotFound)
+                return [literal substringWithRange:NSMakeRange(1,literal.length-2)];
+            NSData *encoded=[[NSString stringWithFormat:@"[%@]",literal]
+                dataUsingEncoding:NSUTF8StringEncoding];
+            NSArray *one=[NSJSONSerialization JSONObjectWithData:encoded
+                options:0 error:nil];
+            return [one isKindOfClass:NSArray.class] && one.count==1 &&
+                [one[0] isKindOfClass:NSString.class] ? one[0] : nil;
+        }
+    }
+    return nil;
+}
+static BOOL FZIJSONIndexValues(NSString *text, NSUInteger *pos, NSString *path,
+                        NSMutableDictionary<NSString *, NSValue *> *ranges,
+                        NSUInteger depth) {
+    if (depth>64) return NO;
+    FZIJSONSkipSpace(text,pos);
+    if (*pos>=text.length) return NO;
+    unichar ch=[text characterAtIndex:*pos];
+    if (ch=='{') {
+        (*pos)++;
+        FZIJSONSkipSpace(text,pos);
+        if (*pos<text.length && [text characterAtIndex:*pos]=='}') {
+            (*pos)++; return YES;
+        }
+        while (*pos<text.length) {
+            NSString *key=FZIJSONReadQuoted(text,pos,NULL);
+            if (!key) return NO;
+            FZIJSONSkipSpace(text,pos);
+            if (*pos>=text.length || [text characterAtIndex:*pos]!=':') return NO;
+            (*pos)++;
+            if (!FZIJSONIndexValues(text,pos,FZIJSONPath(path,key),ranges,depth+1))
+                return NO;
+            FZIJSONSkipSpace(text,pos);
+            if (*pos>=text.length) return NO;
+            unichar sep=[text characterAtIndex:(*pos)++];
+            if (sep=='}') return YES;
+            if (sep!=',') return NO;
+            FZIJSONSkipSpace(text,pos);
+        }
+        return NO;
+    }
+    if (ch=='[') {
+        (*pos)++;
+        FZIJSONSkipSpace(text,pos);
+        if (*pos<text.length && [text characterAtIndex:*pos]==']') {
+            (*pos)++; return YES;
+        }
+        NSUInteger index=0;
+        while (*pos<text.length) {
+            NSString *element=FZIJSONPath(path,[NSString stringWithFormat:
+                @"%lu",(unsigned long)index++]);
+            if (!FZIJSONIndexValues(text,pos,element,ranges,depth+1)) return NO;
+            FZIJSONSkipSpace(text,pos);
+            if (*pos>=text.length) return NO;
+            unichar sep=[text characterAtIndex:(*pos)++];
+            if (sep==']') return YES;
+            if (sep!=',') return NO;
+        }
+        return NO;
+    }
+    NSUInteger start=*pos;
+    if (ch=='"') {
+        if (!FZIJSONReadQuoted(text,pos,NULL)) return NO;
+    } else {
+        while (*pos<text.length) {
+            unichar c=[text characterAtIndex:*pos];
+            if (c==',' || c=='}' || c==']' ||
+                [NSCharacterSet.whitespaceAndNewlineCharacterSet characterIsMember:c])
+                break;
+            (*pos)++;
+        }
+    }
+    if (*pos==start || ranges[path]) return NO; // Duplicate JSON key path: unsafe.
+    ranges[path]=[NSValue valueWithRange:NSMakeRange(start,*pos-start)];
+    return YES;
+}
+static BOOL FZIJSONChangedLeaves(id before,id after,NSString *path,
+    NSDictionary<NSString *,NSValue *> *ranges,NSMutableArray<NSDictionary *> *changes,
+    NSUInteger depth) {
+    if (depth>64) return NO;
+    if ([before isKindOfClass:NSDictionary.class] &&
+        [after isKindOfClass:NSDictionary.class]) {
+        NSDictionary *left=before,*right=after;
+        if (left.count!=right.count) return NO;
+        for (NSString *key in left) {
+            if (!right[key] || !FZIJSONChangedLeaves(left[key],right[key],
+                FZIJSONPath(path,key),ranges,changes,depth+1)) return NO;
+        }
+        return YES;
+    }
+    if ([before isKindOfClass:NSArray.class] &&
+        [after isKindOfClass:NSArray.class]) {
+        NSArray *left=before,*right=after;
+        if (left.count!=right.count) return NO;
+        for (NSUInteger i=0;i<left.count;i++)
+            if (!FZIJSONChangedLeaves(left[i],right[i],FZIJSONPath(path,
+                [NSString stringWithFormat:@"%lu",(unsigned long)i]),
+                ranges,changes,depth+1)) return NO;
+        return YES;
+    }
+    // When container shape changed, fall back to a validated full JSON
+    // serialization; no source-range patch can safely express the addition.
+    if ([before isKindOfClass:NSDictionary.class] ||
+        [after isKindOfClass:NSDictionary.class] ||
+        [before isKindOfClass:NSArray.class] ||
+        [after isKindOfClass:NSArray.class]) return NO;
+    if ([before isEqual:after]) return YES;
+    NSValue *range=ranges[path];
+    if (!range) return NO;
+    NSData *asArray=[NSJSONSerialization dataWithJSONObject:@[after]
+        options:NSJSONWritingFragmentsAllowed error:nil];
+    NSString *encoded=[[NSString alloc] initWithData:asArray
+        encoding:NSUTF8StringEncoding];
+    if (encoded.length<2) return NO;
+    NSString *token=[encoded substringWithRange:NSMakeRange(1,encoded.length-2)];
+    [changes addObject:@{@"range":range,@"token":token}];
+    return YES;
+}
+static NSString *FZIJSONRestoreSelective(NSString *original,id changed,
+                                         NSError **error) {
+    if (!original || !changed) return nil;
+    NSData *sourceData=[original dataUsingEncoding:NSUTF8StringEncoding];
+    id originalTree=[NSJSONSerialization JSONObjectWithData:sourceData
+        options:NSJSONReadingFragmentsAllowed error:nil];
+    if (!originalTree) return nil;
+    if ([originalTree isEqual:changed]) return original;
+    NSMutableDictionary<NSString *,NSValue *> *ranges=[NSMutableDictionary dictionary];
+    NSUInteger cursor=0;
+    BOOL indexed=FZIJSONIndexValues(original,&cursor,@"",ranges,0);
+    FZIJSONSkipSpace(original,&cursor);
+    indexed=indexed && cursor==original.length;
+    NSMutableArray<NSDictionary *> *changes=[NSMutableArray array];
+    if (indexed && FZIJSONChangedLeaves(originalTree,changed,@"",
+        ranges,changes,0)) {
+        NSMutableString *updated=[original mutableCopy];
+        NSArray *sorted=[changes sortedArrayUsingComparator:
+            ^NSComparisonResult(NSDictionary *a,NSDictionary *b) {
+                NSUInteger x=[a[@"range"] rangeValue].location;
+                NSUInteger y=[b[@"range"] rangeValue].location;
+                if (x>y) return NSOrderedAscending;
+                if (x<y) return NSOrderedDescending;
+                return NSOrderedSame;
+            }];
+        for (NSDictionary *edit in sorted)
+            [updated replaceCharactersInRange:[edit[@"range"] rangeValue]
+                                    withString:edit[@"token"]];
+        id reparsed=[NSJSONSerialization JSONObjectWithData:
+            [updated dataUsingEncoding:NSUTF8StringEncoding]
+            options:NSJSONReadingFragmentsAllowed error:nil];
+        if ([reparsed isEqual:changed]) return updated;
+        if (error) *error=FZIError(@"Edited JSON failed byte-preserving validation.");
+        return nil;
+    }
+    // Structural edits necessarily change more than one scalar. Serialize
+    // only that particular JSON payload, never adjacent encoded fields.
+    NSData *reencoded=[NSJSONSerialization dataWithJSONObject:changed
+        options:NSJSONWritingFragmentsAllowed error:error];
+    return reencoded ? [[NSString alloc] initWithData:reencoded
+        encoding:NSUTF8StringEncoding] : nil;
+}
+
 static id FZIProjectJSONValue(id value, NSString *path,
     NSMutableDictionary<NSString *, NSDictionary *> *records, NSUInteger depth);
 static id FZIRestoreJSONValue(id value, NSString *path,
@@ -419,8 +603,10 @@ static id FZIRestoreJSONNode(id value, NSString *path,
             // A nested Base64 value may have its own metadata under this path.
             id child = FZIRestoreJSONNode(value,path,records,depth+1,NO,error);
             if (!child) return nil;
-            bytes = [NSJSONSerialization dataWithJSONObject:child
-                options:NSJSONWritingFragmentsAllowed error:error];
+            NSString *originalJSON=[[NSString alloc] initWithData:
+                FZIBase64(original) encoding:NSUTF8StringEncoding];
+            NSString *rebuilt=FZIJSONRestoreSelective(originalJSON,child,error);
+            bytes=[rebuilt dataUsingEncoding:NSUTF8StringEncoding];
         } else if ([format isEqualToString:@"utf8"]) {
             if (![value isKindOfClass:NSString.class]) {
                 if (error) *error = FZIError(@"Embedded UTF-8 must remain text.");
@@ -686,8 +872,12 @@ static NSString *FZIRestoreBlock(NSString *body, FZIBlock *block, NSError **erro
         if(!json) return nil;
         id restored = FZIRestoreJSONValue(json, @"", block.jsonEncodings ?: @{}, 0, error);
         if(!restored) return nil;
-        bytes=[NSJSONSerialization dataWithJSONObject:restored
-            options:NSJSONWritingFragmentsAllowed error:error];
+        NSString *originalJSON=block.encoding==FZIEncodingJSONInString
+            ? FZIXMLUnescape(block.originalBody)
+            : [[NSString alloc] initWithData:block.originalBytes
+                encoding:NSUTF8StringEncoding];
+        NSString *rebuilt=FZIJSONRestoreSelective(originalJSON,restored,error);
+        bytes=[rebuilt dataUsingEncoding:NSUTF8StringEncoding];
         if(!bytes) return nil;
     } else if(block.encoding==FZIEncodingText) {
         bytes=[content dataUsingEncoding:NSUTF8StringEncoding];
@@ -800,10 +990,7 @@ static NSString *FZIValidateAndRestore(FZIProjection *projection,
         id restored=FZIRestoreJSONValue(parsed,@"",
             projection.rootJSONEncodings ?: @{},0,error);
         if (!restored) return nil;
-        NSData *output=[NSJSONSerialization dataWithJSONObject:restored
-            options:NSJSONWritingFragmentsAllowed error:error];
-        return output ? [[NSString alloc] initWithData:output
-            encoding:NSUTF8StringEncoding] : nil;
+        return FZIJSONRestoreSelective(projection.original,restored,error);
     }
     NSString *xml=FZIRestoreXML(visible,projection.blocks,error);
     if (!xml) return nil;
