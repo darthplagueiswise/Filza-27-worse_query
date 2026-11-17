@@ -194,6 +194,9 @@ static BOOL FZIHasPlistEnvelope(NSData *bytes);
 static BOOL FZILooksLikeBase64(NSString *candidate, NSData *bytes) {
     if (!bytes || !candidate.length || FZIIsUUID(candidate)) return NO;
     if (FZIHasPlistEnvelope(bytes)) return YES;
+    // Thrift Compact has no magic header: accept it only when it parses
+    // completely and reproduces the exact original bytes canonically.
+    if (bytes.length>=16 && FZICompactThriftDecode(bytes)) return YES;
     NSString *utf8=FZIReadableUTF8(bytes);
     if (!utf8) return NO;
     NSString *trimmed=[utf8 stringByTrimmingCharactersInSet:
