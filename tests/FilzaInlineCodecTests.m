@@ -375,10 +375,6 @@ int main(int argc, const char *argv[]) {
             @"neighbor UUID changed during binary Base64 save");
         NSData *rebuiltMixed=[[NSData alloc] initWithBase64EncodedString:
             binaryRoot[@"bootstrap_config"] options:0];
-        NSMutableData *expectedMixed=[mixed mutableCopy];
-        NSRange urlRange=[[@"" stringByPaddingToLength:0 withString:@"" startingAtIndex:0]
-            rangeOfString:@"nomatch"];
-        (void)urlRange;
         FZIRequire([rebuiltMixed rangeOfData:
             [@"https://cdn.example.net/modified" dataUsingEncoding:NSUTF8StringEncoding]
             options:0 range:NSMakeRange(0,rebuiltMixed.length)].location!=NSNotFound,

@@ -17,6 +17,7 @@ typedef NS_ENUM(NSUInteger, FZIEncoding) {
     FZIEncodingJSON,
     FZIEncodingText,
     FZIEncodingHex,
+    FZIEncodingEscapedBytes,
     FZIEncodingJSONInString
 };
 
@@ -187,12 +188,76 @@ static NSString *FZIReadableUTF8(NSData *bytes) {
     }
     return text;
 }
+// A mixed binary payload is not a JSON/plist and must not be represented
+// as one. Show its real ASCII spans and encode non-text bytes as \xHH, so
+// the presentation is editable without discarding a single byte.
+static BOOL FZIHasReadableBinarySpan(NSData *bytes) {
+    if (!bytes || bytes.length<24) return NO;
+    const unsigned char *p=bytes.bytes;
+    NSUInteger streak=0;
+    for (NSUInteger i=0;i<bytes.length;i++) {
+        if (p[i]>=0x20 && p[i]<=0x7E) {
+            if (++streak>=8) return YES;
+        } else streak=0;
+    }
+    return NO;
+}
+static NSString *FZIEscapeBytes(NSData *bytes) {
+    if (!bytes || !bytes.length || bytes.length>4*1024*1024) return nil;
+    const unsigned char *p=bytes.bytes;
+    NSMutableString *out=[NSMutableString stringWithCapacity:bytes.length*2];
+    for (NSUInteger i=0;i<bytes.length;i++) {
+        unsigned char c=p[i];
+        if (c=='\\') [out appendString:@"\\\\"];
+        else if (c>=0x20 && c<=0x7e && c!='<' && c!='>' && c!='&')
+            [out appendFormat:@"%C",(unichar)c];
+        else [out appendFormat:@"\\x%02X",(unsigned)c];
+    }
+    return out;
+}
+static NSInteger FZIHexNibble(unichar c) {
+    if (c>='0' && c<='9') return c-'0';
+    if (c>='a' && c<='f') return c-'a'+10;
+    if (c>='A' && c<='F') return c-'A'+10;
+    return -1;
+}
+static NSData *FZIUnescapeBytes(NSString *text) {
+    if (![text isKindOfClass:NSString.class] || text.length>16*1024*1024)
+        return nil;
+    NSMutableData *out=[NSMutableData data];
+    for (NSUInteger i=0;i<text.length;i++) {
+        unichar c=[text characterAtIndex:i];
+        uint8_t b=0;
+        if (c=='\\') {
+            if (++i>=text.length) return nil;
+            unichar kind=[text characterAtIndex:i];
+            if (kind=='\\') b='\\';
+            else if (kind=='x' && i+2<text.length) {
+                NSInteger hi=FZIHexNibble([text characterAtIndex:i+1]);
+                NSInteger lo=FZIHexNibble([text characterAtIndex:i+2]);
+                if (hi<0 || lo<0) return nil;
+                b=(uint8_t)((hi<<4)|lo);
+                i+=2;
+            } else return nil;
+        } else if (c>=0x20 && c<=0x7e && c!='<' && c!='>' && c!='&')
+            b=(uint8_t)c;
+        else return nil;
+        [out appendBytes:&b length:1];
+        if (out.length>4*1024*1024) return nil;
+    }
+    return out;
+}
+
 static BOOL FZIHasPlistEnvelope(NSData *bytes);
 static BOOL FZILooksLikeBase64(NSString *candidate, NSData *bytes) {
     if (!bytes || !candidate.length || FZIIsUUID(candidate)) return NO;
     if (FZIHasPlistEnvelope(bytes)) return YES;
     NSString *utf8=FZIReadableUTF8(bytes);
-    if (!utf8) return NO;
+    if (!utf8) {
+        // A long standard/URL-safe Base64 can contain structured binary
+        // metadata with readable ASCII spans. No random binary or UUID guess.
+        return candidate.length>=72 && FZIHasReadableBinarySpan(bytes);
+    }
     NSString *trimmed=[utf8 stringByTrimmingCharactersInSet:
         NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (!trimmed.length) return NO;
@@ -643,8 +708,12 @@ static id FZIProjectJSONValue(id value, NSString *path,
             decoded = text;
         }
     }
-    // Unknown or opaque binary is *not* meaningful text. Preserve its
-    // Base64 spelling unchanged instead of displaying misleading HEX.
+    // Binary metadata can embed ASCII configuration fields without being
+    // valid UTF-8 as a whole. Present only bytes we can round-trip losslessly.
+    if (!format && string.length>=72 && FZIHasReadableBinarySpan(bytes)) {
+        format=@"escaped-bytes";
+        decoded=FZIEscapeBytes(bytes);
+    }
     if (!format || !decoded) return value;
     records[path] = @{@"format":format, @"original":string,
                       @"display":decoded};
@@ -701,6 +770,12 @@ static id FZIRestoreJSONNode(id value, NSString *path,
                 return nil;
             }
             bytes = FZIUnhex(value);
+        } else if ([format isEqualToString:@"escaped-bytes"]) {
+            if (![value isKindOfClass:NSString.class]) {
+                if (error) *error = FZIError(@"Embedded binary content must stay text.");
+                return nil;
+            }
+            bytes = FZIUnescapeBytes(value);
         }
         if (!bytes) {
             if (error && !*error)
@@ -776,7 +851,11 @@ static NSString *FZIProjectDecodedData(NSData *bytes, FZIBlock *block, NSUIntege
         block.encoding=FZIEncodingText;
         return utf8;
     }
-    // Leave unrecognized payloads as their original Base64, not HEX.
+    if (bytes.length>=24 && FZIHasReadableBinarySpan(bytes)) {
+        block.encoding=FZIEncodingEscapedBytes;
+        return FZIEscapeBytes(bytes);
+    }
+    // Truly opaque binary without recognizable text remains Base64.
     return nil;
 }
 
@@ -932,6 +1011,10 @@ static NSString *FZIRestoreBlock(NSString *body, FZIBlock *block, NSError **erro
     } else if(block.encoding==FZIEncodingHex) {
         bytes=FZIUnhex(content);
         if(!bytes && error) *error=FZIError(@"Invalid hexadecimal bytes in decoded field.");
+    } else if(block.encoding==FZIEncodingEscapedBytes) {
+        bytes=FZIUnescapeBytes(content);
+        if(!bytes && error)
+            *error=FZIError(@"Invalid \\xNN escape in decoded binary content.");
     }
     if(!bytes) return nil;
     if(block.encoding==FZIEncodingHex && block.originalBytes.length >= 8) {
