@@ -41,6 +41,8 @@ typedef NS_ENUM(NSUInteger, FZIEncoding) {
 @property(nonatomic, copy) NSString *original;
 @property(nonatomic, copy) NSString *display;
 @property(nonatomic, strong) NSArray<FZIBlock *> *blocks;
+@property(nonatomic) BOOL rootJSON;
+@property(nonatomic, copy) NSDictionary<NSString *, NSDictionary *> *rootJSONEncodings;
 @end
 @implementation FZIProjection @end
 
@@ -124,25 +126,85 @@ static NSData *FZIUnhex(NSString *text) {
     }
     return result;
 }
+// Accept the four common transport variants: standard/URL-safe, with or
+// without padding, including whitespace-wrapped XML <data> payloads.
+// Successful decoding alone is not proof a plain plist string is Base64.
 static NSData *FZIBase64(NSString *raw) {
-    NSMutableString *s = [NSMutableString string];
-    NSCharacterSet *whitespace = NSCharacterSet.whitespaceAndNewlineCharacterSet;
-    NSCharacterSet *alphabet = [NSCharacterSet characterSetWithCharactersInString:
-        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="];
-    for (NSUInteger i=0; i<raw.length; i++) {
+    if (![raw isKindOfClass:NSString.class] || !raw.length) return nil;
+    NSMutableString *encoded=[NSMutableString string];
+    NSCharacterSet *whitespace=NSCharacterSet.whitespaceAndNewlineCharacterSet;
+    NSCharacterSet *alphabet=[NSCharacterSet characterSetWithCharactersInString:
+        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/-_="];
+    BOOL standard=NO, urlSafe=NO;
+    for (NSUInteger i=0;i<raw.length;i++) {
         unichar ch=[raw characterAtIndex:i];
         if ([whitespace characterIsMember:ch]) continue;
         if (![alphabet characterIsMember:ch]) return nil;
-        [s appendFormat:@"%C",ch];
+        if (ch=='+' || ch=='/') standard=YES;
+        if (ch=='-' || ch=='_') urlSafe=YES;
+        [encoded appendFormat:@"%C",ch];
     }
-    if (!s.length || s.length % 4) return nil;
-    NSData *data=[[NSData alloc] initWithBase64EncodedString:s options:0];
-    if (!data || ![[data base64EncodedStringWithOptions:0] isEqualToString:s])
-        return nil;
-    return data;
+    if (standard && urlSafe) return nil;
+    if (!encoded.length || encoded.length%4==1) return nil;
+    NSString *normalized=[[encoded stringByReplacingOccurrencesOfString:@"-"
+        withString:@"+"] stringByReplacingOccurrencesOfString:@"_" withString:@"/"];
+    NSRange firstPadding=[normalized rangeOfString:@"="];
+    if (firstPadding.location!=NSNotFound) {
+        if (normalized.length%4) return nil;
+        NSString *suffix=[normalized substringFromIndex:firstPadding.location];
+        if (suffix.length>2 || [suffix stringByTrimmingCharactersInSet:
+            [NSCharacterSet characterSetWithCharactersInString:@"="]].length)
+            return nil;
+    } else if (normalized.length%4) {
+        NSUInteger padding=4-normalized.length%4;
+        normalized=[normalized stringByPaddingToLength:normalized.length+padding
+                                             withString:@"=" startingAtIndex:0];
+    }
+    NSData *bytes=[[NSData alloc] initWithBase64EncodedString:normalized options:0];
+    if (!bytes || ![[bytes base64EncodedStringWithOptions:0]
+                      isEqualToString:normalized]) return nil;
+    return bytes;
+}
+
+static BOOL FZILooksLikeBase64(NSString *candidate, NSData *bytes) {
+    if (!bytes || !candidate.length) return NO;
+    if ([candidate rangeOfCharacterFromSet:[NSCharacterSet
+         characterSetWithCharactersInString:@"=+/-_"]].location!=NSNotFound)
+        return YES;
+    if (bytes.length>=8 && !memcmp(bytes.bytes,"bplist00",8)) return YES;
+    NSString *trimmed=[[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
+    if (trimmed) {
+        trimmed=[trimmed stringByTrimmingCharactersInSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if ([trimmed hasPrefix:@"{"] || [trimmed hasPrefix:@"["] ||
+            [trimmed hasPrefix:@"<?xml"] || [trimmed hasPrefix:@"<plist"])
+            return YES;
+        // A Base64-looking word is not sufficient: "metadata", "override",
+        // etc. must remain ordinary strings if their decoded bytes are noise.
+        BOOL readable=YES;
+        for (NSUInteger i=0;i<trimmed.length;i++) {
+            unichar c=[trimmed characterAtIndex:i];
+            if (c<0x20 && c!='\t' && c!='\r' && c!='\n') {
+                readable=NO; break;
+            }
+        }
+        if (readable && candidate.length>=8 && trimmed.length>=3) return YES;
+    }
+    return candidate.length>=16;
 }
 static NSString *FZIRewrap64(NSData *data, NSString *original) {
     NSString *s=[data base64EncodedStringWithOptions:0];
+    // A modified Base64URL value remains URL-safe; an unpadded transport
+    // remains unpadded. Unedited values bypass this method entirely.
+    BOOL urlSafe=([original rangeOfString:@"-"].location!=NSNotFound ||
+                  [original rangeOfString:@"_"].location!=NSNotFound);
+    BOOL padded=([original rangeOfString:@"="].location!=NSNotFound);
+    if (urlSafe) {
+        s=[[s stringByReplacingOccurrencesOfString:@"+" withString:@"-"]
+            stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
+    }
+    if (!padded)
+        s=[s stringByReplacingOccurrencesOfString:@"=" withString:@""];
     NSString *leading=FZILeadingSpace(original);
     NSString *trailing=FZITrailingSpace(original);
     NSString *inner=[original substringWithRange:NSMakeRange(leading.length,
@@ -282,10 +344,11 @@ static id FZIProjectJSONValue(id value, NSString *path,
         }
         return out;
     }
-    if (![value isKindOfClass:NSString.class] || [value length] < 8) return value;
+    if (![value isKindOfClass:NSString.class] || [value length] < 4) return value;
     NSString *string = (NSString *)value;
     NSData *bytes = FZIBase64(string);
-    if (!bytes || bytes.length > 4 * 1024 * 1024) return value;
+    if (!bytes || bytes.length > 4 * 1024 * 1024 ||
+        !FZILooksLikeBase64(string,bytes)) return value;
     NSString *format = nil;
     id decoded = nil;
     NSPropertyListFormat plistFormat = NSPropertyListXMLFormat_v1_0;
@@ -376,7 +439,7 @@ static id FZIRestoreJSONNode(id value, NSString *path,
                 *error = FZIError(@"Could not encode edited Base64 JSON value.");
             return nil;
         }
-        return [bytes base64EncodedStringWithOptions:0];
+        return FZIRewrap64(bytes,original);
     }
     if ([value isKindOfClass:NSDictionary.class]) {
         NSMutableDictionary *out = [NSMutableDictionary dictionaryWithCapacity:
@@ -495,9 +558,9 @@ static NSString *FZIProjectXML(NSString *source,
                         value=[[NSString alloc] initWithData:pretty
                             encoding:NSUTF8StringEncoding];
                     }
-                } else if(plain.length>=16) {
+                } else if(plain.length>=4) {
                     NSData *decoded=FZIBase64(plain);
-                    if(decoded) {
+                    if(decoded && FZILooksLikeBase64(plain,decoded)) {
                         block.originalBytes=decoded;
                         value=FZIProjectDecodedData(decoded,block,depth+1);
                         // Display opaque Base64 as editable HEX too. Short values
@@ -683,33 +746,72 @@ static NSString *FZIRestoreXML(NSString *visible, NSArray<FZIBlock *> *blocks,
 }
 
 static FZIProjection *FZIMakeProjection(NSString *text) {
-    if(!text || text.length>36*1024*1024 ||
-       [text rangeOfString:@"<plist"].location==NSNotFound) return nil;
+    if (!text || text.length>36*1024*1024) return nil;
     NSData *bytes=[text dataUsingEncoding:NSUTF8StringEncoding];
-    id structure=[NSPropertyListSerialization propertyListWithData:bytes
-        options:0 format:NULL error:nil];
-    if(!structure) return nil;
+    if (!bytes) return nil;
     FZIProjection *projection=[FZIProjection new];
     projection.original=text;
-    NSMutableArray *blocks=[NSMutableArray array];
-    projection.display=FZIProjectXML(text,blocks,0);
-    if([projection.display isEqualToString:text]) return nil;
-    projection.blocks=blocks;
-    // A projection must be lossless before it is ever shown.
-    NSError *error=nil;
-    NSString *roundtrip=FZIRestoreXML(projection.display,blocks,&error);
-    return [roundtrip isEqualToString:text] ? projection : nil;
+    if ([text rangeOfString:@"<plist"].location!=NSNotFound) {
+        id plist=[NSPropertyListSerialization propertyListWithData:bytes
+            options:0 format:NULL error:nil];
+        if (!plist) return nil;
+        NSMutableArray *blocks=[NSMutableArray array];
+        projection.display=FZIProjectXML(text,blocks,0);
+        if ([projection.display isEqualToString:text]) return nil;
+        projection.blocks=blocks;
+        NSError *error=nil;
+        NSString *roundtrip=FZIRestoreXML(projection.display,blocks,&error);
+        return [roundtrip isEqualToString:text] ? projection : nil;
+    }
+    // The same original text editor can also open JSON documents. Project
+    // Base64 JSON string values in the view, but preserve the untouched
+    // original JSON source byte-for-byte on Save.
+    id json=[NSJSONSerialization JSONObjectWithData:bytes
+        options:NSJSONReadingFragmentsAllowed error:nil];
+    if (![json isKindOfClass:NSDictionary.class] &&
+        ![json isKindOfClass:NSArray.class]) return nil;
+    NSMutableDictionary *records=[NSMutableDictionary dictionary];
+    id readable=FZIProjectJSONValue(json,@"",records,0);
+    if (!records.count) return nil;
+    NSData *display=[NSJSONSerialization dataWithJSONObject:readable
+        options:NSJSONWritingPrettyPrinted|NSJSONWritingFragmentsAllowed
+        error:nil];
+    if (!display) return nil;
+    projection.display=[[NSString alloc] initWithData:display
+        encoding:NSUTF8StringEncoding];
+    projection.rootJSON=YES;
+    projection.rootJSONEncodings=[records copy];
+    if (!projection.display.length) return nil;
+    return projection;
 }
 
 static NSString *FZIValidateAndRestore(FZIProjection *projection,
                                         NSString *visible,NSError **error) {
+    if (!projection || !visible) {
+        if (error) *error=FZIError(@"The editor has no active encoded document.");
+        return nil;
+    }
+    if (projection.rootJSON) {
+        if ([visible isEqualToString:projection.display]) return projection.original;
+        id parsed=[NSJSONSerialization JSONObjectWithData:
+            [visible dataUsingEncoding:NSUTF8StringEncoding]
+            options:NSJSONReadingFragmentsAllowed error:error];
+        if (!parsed) return nil;
+        id restored=FZIRestoreJSONValue(parsed,@"",
+            projection.rootJSONEncodings ?: @{},0,error);
+        if (!restored) return nil;
+        NSData *output=[NSJSONSerialization dataWithJSONObject:restored
+            options:NSJSONWritingFragmentsAllowed error:error];
+        return output ? [[NSString alloc] initWithData:output
+            encoding:NSUTF8StringEncoding] : nil;
+    }
     NSString *xml=FZIRestoreXML(visible,projection.blocks,error);
-    if(!xml) return nil;
+    if (!xml) return nil;
     // Fully validate the newly assembled plist before passing it to Filza.
     NSData *data=[xml dataUsingEncoding:NSUTF8StringEncoding];
     id parsed=[NSPropertyListSerialization propertyListWithData:data
         options:0 format:NULL error:error];
-    if(!parsed) return nil;
+    if (!parsed) return nil;
     return xml;
 }
 
