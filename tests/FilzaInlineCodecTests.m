@@ -365,6 +365,31 @@ int main(int argc, const char *argv[]) {
         FZIRequire([parsedAfter[@"field_1"][0][@"field_3"]
             isEqual:thriftTask[@"field_3"]],
             @"untouched nested Thrift structure must remain unchanged");
+        // Empty Thrift strings remain ordinary editable text, not an
+        // unclassified binary token. Real plist sample contains such values.
+        NSData *typedJSON=[NSJSONSerialization dataWithJSONObject:typedThrift
+            options:0 error:nil];
+        NSMutableDictionary *emptyTyped=[NSJSONSerialization JSONObjectWithData:
+            typedJSON options:NSJSONReadingMutableContainers error:nil];
+        emptyTyped[@"fields"][0][@"value"][@"items"][0][@"fields"][0]
+            [@"value"]=@{@"text":@""};
+        NSData *emptyBinary=FZICompactThriftEncode(emptyTyped);
+        NSDictionary *emptyDecoded=FZICompactThriftDecode(emptyBinary);
+        FZIRequire(emptyDecoded!=nil && [emptyDecoded[@"fields"][0][@"value"]
+            [@"items"][0][@"fields"][0][@"value"][@"text"] isEqualToString:@""],
+            @"empty string must decode as editable text");
+        NSMutableDictionary *emptyReadable=[NSJSONSerialization JSONObjectWithData:
+            [NSJSONSerialization dataWithJSONObject:
+             FZICompactThriftDisplay(emptyDecoded) options:0 error:nil]
+            options:NSJSONReadingMutableContainers error:nil];
+        emptyReadable[@"field_1"][0][@"field_1"]=@"edited-empty";
+        NSData *emptySaved=FZICompactThriftEncodeEdited(emptyDecoded,
+            emptyReadable,NULL);
+        FZIRequire(emptySaved!=nil && [[FZICompactThriftDisplay(
+            FZICompactThriftDecode(emptySaved)) objectForKey:@"field_1"][0]
+            [@"field_1"] isEqualToString:@"edited-empty"],
+            @"empty string changed to nonempty must survive Thrift re-encoding");
+
         NSString *thriftXML=[NSString stringWithFormat:
             @"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>"
              "<key>bootstrap_config</key><string>%@</string>"
