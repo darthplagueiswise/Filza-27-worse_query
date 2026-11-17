@@ -365,6 +365,37 @@ int main(int argc, const char *argv[]) {
         FZIRequire([parsedAfter[@"field_1"][0][@"field_3"]
             isEqual:thriftTask[@"field_3"]],
             @"untouched nested Thrift structure must remain unchanged");
+        // Meta's official Compact Protocol uses CType::Float=13
+        // (4-byte little-endian IEEE 754), NOT UUID. Check both directions.
+        const uint8_t floatCompactBytes[]={
+            0x1d, 0x00, 0x00, 0xc0, 0x3f, // field_1 float 1.5
+            0x18, 0x05, 'h','e','l','l','o', // field_2 string
+            0x00 // stop
+        };
+        NSData *floatCompact=[NSData dataWithBytes:floatCompactBytes
+                                           length:sizeof(floatCompactBytes)];
+        NSDictionary *floatTree=FZICompactThriftDecode(floatCompact);
+        FZIRequire(floatTree!=nil,@"Meta Compact float code 13 should decode");
+        FZIRequire([FZICompactThriftEncode(floatTree) isEqualToData:floatCompact],
+            @"Meta Compact float fixture must round-trip byte exact");
+        NSDictionary *floatView=FZICompactThriftDisplay(floatTree);
+        FZIRequire([floatView[@"field_1"] isEqual:@1.5f] &&
+                   [floatView[@"field_2"] isEqualToString:@"hello"],
+            @"float must be a 32-bit number, not a UUID");
+        NSMutableDictionary *floatEdited=[floatView mutableCopy];
+        floatEdited[@"field_1"]=@2.5f;
+        NSData *floatOutput=FZICompactThriftEncodeEdited(floatTree,floatEdited,NULL);
+        const uint8_t expectedFloat[]={
+            0x1d, 0x00, 0x00, 0x20, 0x40,
+            0x18, 0x05, 'h','e','l','l','o',0x00
+        };
+        FZIRequire([floatOutput isEqualToData:
+            [NSData dataWithBytes:expectedFloat length:sizeof(expectedFloat)]],
+            @"edited float must preserve the correct Compact wire format");
+        FZIRequire(FZICompactThriftEncodeEdited(floatTree,
+            @{@"field_1":@(1e40),@"field_2":@"hello"},NULL)==nil,
+            @"float overflow must refuse save instead of corrupting bytes");
+
         // Empty Thrift strings remain ordinary editable text, not an
         // unclassified binary token. Real plist sample contains such values.
         NSData *typedJSON=[NSJSONSerialization dataWithJSONObject:typedThrift

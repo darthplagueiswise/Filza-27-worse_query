@@ -5,6 +5,8 @@
 #import <Foundation/Foundation.h>
 #import <stdint.h>
 #import <string.h>
+#import <float.h>
+#import <math.h>
 
 static const NSUInteger kTCMaxBytes=4*1024*1024;
 static const NSUInteger kTCMaxDepth=34;
@@ -29,7 +31,7 @@ static NSString *TCType(uint8_t c) {
         case 10: return @"set";
         case 11: return @"map";
         case 12: return @"struct";
-        case 13: return @"uuid";
+        case 13: return @"float";
         default: return nil;
     }
 }
@@ -45,7 +47,7 @@ static uint8_t TCCode(NSString *s) {
     if([s isEqualToString:@"set"]) return 10;
     if([s isEqualToString:@"map"]) return 11;
     if([s isEqualToString:@"struct"]) return 12;
-    if([s isEqualToString:@"uuid"]) return 13;
+    if([s isEqualToString:@"float"]) return 13;
     return 0;
 }
 static uint8_t TCByte(TCReader *r) {
@@ -182,10 +184,13 @@ static id TCReadValue(TCReader *r,uint8_t typ,NSUInteger depth,BOOL inField) {
         }
         case 12: return TCReadStruct(r,depth+1);
         case 13: {
-            NSData *sixteen=TCBytes(r,16);if(!sixteen)return nil;
-            uuid_t raw;memcpy(raw,sixteen.bytes,16);
-            NSUUID *uuid=[[NSUUID alloc] initWithUUIDBytes:raw];
-            return uuid.UUIDString ?: nil;
+            // Meta fbthrift Compact CType::Float is code 13, 4-byte IEEE 754.
+            NSData *four=TCBytes(r,4);if(!four)return nil;
+            uint32_t bits=0;const uint8_t *p=four.bytes;
+            for(unsigned i=0;i<4;i++)bits|=((uint32_t)p[i])<<(8*i);
+            float number;memcpy(&number,&bits,4);
+            if(!isfinite(number)){r->invalid=YES;return nil;}
+            return @(number);
         }
     }
     r->invalid=YES;return nil;
@@ -303,9 +308,12 @@ static BOOL TCWriteValue(NSMutableData *out,TCWriter *w,NSString *typ,id value,
         }
         case 12: return TCWriteStruct(out,w,value,depth+1);
         case 13: {
-            if(![value isKindOfClass:NSString.class])return NO;
-            NSUUID *uuid=[[NSUUID alloc] initWithUUIDString:value];if(!uuid)return NO;
-            uuid_t raw;[uuid getUUIDBytes:raw];[out appendBytes:raw length:16];
+            if(![value isKindOfClass:NSNumber.class])return NO;
+            double numeric=[value doubleValue];
+            if(!isfinite(numeric) || fabs(numeric)>FLT_MAX)return NO;
+            float number=(float)numeric;
+            uint32_t bits;memcpy(&bits,&number,4);
+            for(unsigned i=0;i<4;i++)TCOut(out,(uint8_t)(bits>>(8*i)));
             return YES;
         }
     }
@@ -444,11 +452,12 @@ static id TCApplyType(NSString *type,id previous,id edited,NSUInteger depth) {
         if(![edited isKindOfClass:NSString.class])return nil;
         return @{@"text":edited};
     }
-    if([type isEqualToString:@"uuid"])
-        return [edited isKindOfClass:NSString.class] &&
-            [[NSUUID alloc] initWithUUIDString:edited] ? edited : nil;
     if(![edited isKindOfClass:NSNumber.class])return nil;
     if([type isEqualToString:@"double"])return isfinite([edited doubleValue])?edited:nil;
+    if([type isEqualToString:@"float"]) {
+        double n=[edited doubleValue];
+        return (isfinite(n) && fabs(n)<=FLT_MAX)?edited:nil;
+    }
     if([type isEqualToString:@"bool"])return edited;
     if([edited doubleValue]!=[edited longLongValue])return nil;
     long long n=[edited longLongValue];
