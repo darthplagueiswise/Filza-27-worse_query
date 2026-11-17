@@ -235,6 +235,42 @@ static NSString *FZIRewrap64(NSData *data, NSString *original) {
     return wrapped;
 }
 
+// The editor is intentionally showing decoded JSON directly inside plist
+// <data>/<string>. A JSON string can contain literal XML markup, including a
+// full decoded binary plist. Those characters are JSON DATA, not outer tags.
+// Skip balanced JSON object/array regions before matching XML value tags.
+static NSUInteger FZIJSONContentEnd(NSString *text, NSUInteger start) {
+    NSCharacterSet *whitespace=NSCharacterSet.whitespaceAndNewlineCharacterSet;
+    while (start<text.length &&
+           [whitespace characterIsMember:[text characterAtIndex:start]]) start++;
+    if (start>=text.length) return NSNotFound;
+    unichar first=[text characterAtIndex:start];
+    if (first!='{' && first!='[') return NSNotFound;
+    unichar expected[64] = {0};
+    NSUInteger depth=0;
+    BOOL quoted=NO, escaped=NO;
+    for (NSUInteger i=start;i<text.length;i++) {
+        unichar c=[text characterAtIndex:i];
+        if (quoted) {
+            if (escaped) { escaped=NO; continue; }
+            if (c=='\\') { escaped=YES; continue; }
+            if (c=='"') quoted=NO;
+            continue;
+        }
+        if (c=='"') { quoted=YES; continue; }
+        if (c=='{' || c=='[') {
+            if (depth==64) return NSNotFound;
+            expected[depth++]=(c=='{')?'}':']';
+            continue;
+        }
+        if (c=='}' || c==']') {
+            if (!depth || expected[depth-1]!=c) return NSNotFound;
+            if (!--depth) return i+1;
+        }
+    }
+    return NSNotFound;
+}
+
 // Locate primitive XML value nodes. Only their display bodies are virtual;
 // original bytes remain in FZIProjection until the corresponding value changes.
 static NSArray<FZISpan *> *FZISpans(NSString *source, NSError **error) {
@@ -249,7 +285,11 @@ static NSArray<FZISpan *> *FZISpans(NSString *source, NSError **error) {
         options:0 range:NSMakeRange(0,source.length)];
     NSMutableArray<FZISpan *> *found=[NSMutableArray array];
     NSMutableArray<FZISpan *> *stack=[NSMutableArray array];
+    NSUInteger protectedJSONEnd=0;
     for (NSTextCheckingResult *m in matches) {
+        // Treat <string> and </data> sequences inside JSON quoted values
+        // as plain content; only the real surrounding XML tags are structural.
+        if (m.range.location<protectedJSONEnd) continue;
         BOOL closing=[m rangeAtIndex:1].length>0;
         NSString *tag=[[source substringWithRange:[m rangeAtIndex:2]] lowercaseString];
         if (!closing) {
@@ -257,6 +297,8 @@ static NSArray<FZISpan *> *FZISpans(NSString *source, NSError **error) {
             span.tag=tag;
             span.opening=m.range;
             [stack addObject:span];
+            NSUInteger jsonEnd=FZIJSONContentEnd(source,NSMaxRange(m.range));
+            if (jsonEnd!=NSNotFound) protectedJSONEnd=jsonEnd;
         } else {
             FZISpan *span=stack.lastObject;
             if (!span || ![span.tag isEqualToString:tag]) {
