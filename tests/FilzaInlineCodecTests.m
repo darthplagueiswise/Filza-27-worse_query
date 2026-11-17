@@ -159,6 +159,15 @@ int main(int argc, const char *argv[]) {
             restoredJSONBytes options:0 error:&rootError];
         FZIRequire([restoredJSONPayload[@"config"][@"version"] isEqual:@4],
             @"root JSON nested Base64 edit not persisted");
+        // The original JSON file is not globally pretty-printed or compacted:
+        // replacing one encoded value must preserve all other characters.
+        FZIRequire([restoredJSON hasPrefix:
+            @"{ \"ordinary\" : \"metadata\", \"payload\" : \""],
+            @"the JSON prefix must remain byte-identical after a nested edit");
+        FZIRequire([restoredJSON hasSuffix:
+            @"\", \"untouched\" : 7 }\n"],
+            @"the JSON suffix (spaces/newline) must remain byte-identical");
+
 
         // URL-safe and unpadded Base64 are valid encodings, not plain text.
         NSData *urlBytes=[NSData dataWithBytes:
