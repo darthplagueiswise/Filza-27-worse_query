@@ -277,6 +277,22 @@ static NSArray<FZISpan *> *FZISpans(NSString *source, NSError **error) {
     return found;
 }
 
+// Foundation also accepts bare OpenStep plist scalars such as "Hello".
+// Treating arbitrary UTF-8 as plist would insert <string>...</string> markup
+// into embedded JSON and make the read-only projection non-reversible.
+static BOOL FZIHasPlistEnvelope(NSData *bytes) {
+    if (!bytes.length) return NO;
+    if (bytes.length>=8 && memcmp(bytes.bytes,"bplist00",8)==0) return YES;
+    NSString *source=[[NSString alloc] initWithData:bytes
+        encoding:NSUTF8StringEncoding];
+    if (!source) return NO;
+    NSString *trim=[source stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return ([trim hasPrefix:@"<plist"] ||
+            (([trim hasPrefix:@"<?xml"] || [trim hasPrefix:@"<!DOCTYPE"]) &&
+             [trim rangeOfString:@"<plist"].location!=NSNotFound));
+}
+
 static NSString *FZIPlistBody(NSData *bytes) {
     NSString *xml=[[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
     NSRange start=[xml rangeOfString:@"<plist"];
@@ -545,8 +561,9 @@ static id FZIProjectJSONValue(id value, NSString *path,
     NSString *format = nil;
     id decoded = nil;
     NSPropertyListFormat plistFormat = NSPropertyListXMLFormat_v1_0;
-    id plist = [NSPropertyListSerialization propertyListWithData:bytes
-        options:0 format:&plistFormat error:nil];
+    id plist = FZIHasPlistEnvelope(bytes) ?
+        [NSPropertyListSerialization propertyListWithData:bytes
+            options:0 format:&plistFormat error:nil] : nil;
     if (plist) {
         NSData *asXML = [NSPropertyListSerialization dataWithPropertyList:plist
             format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
@@ -665,8 +682,10 @@ static id FZIRestoreJSONNode(id value, NSString *path,
 static NSString *FZIProjectDecodedData(NSData *bytes, FZIBlock *block, NSUInteger depth) {
     if (depth>18 || bytes.length>16*1024*1024) return nil;
     NSPropertyListFormat format=NSPropertyListXMLFormat_v1_0;
-    id plist=[NSPropertyListSerialization propertyListWithData:bytes
-        options:NSPropertyListMutableContainersAndLeaves format:&format error:nil];
+    id plist=FZIHasPlistEnvelope(bytes) ?
+        [NSPropertyListSerialization propertyListWithData:bytes
+            options:NSPropertyListMutableContainersAndLeaves format:&format
+            error:nil] : nil;
     if(plist) {
         NSData *xmlBytes=[NSPropertyListSerialization dataWithPropertyList:plist
             format:NSPropertyListXMLFormat_v1_0 options:0 error:nil];
