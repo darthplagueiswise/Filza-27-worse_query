@@ -1,86 +1,97 @@
-# Filza native inline embedded-data editor
+# Filza — reversible native text editor for encoded data
 
-This module extends the ORIGINAL TGFastTextEditViewController and its
-ICTextView/HCodeAttributedString, not the Filza plist editor. No new toolbar,
-button, sheet or secondary editor is introduced.
+The feature runs in the **existing** `TGFastTextEditViewController` and
+`ICTextView/HCodeAttributedString`. It does not replace Filza's plist editor,
+text editor UI, filesystem access, permissions, or native Save button.
 
-## Why the previous build could not save
+## Design
 
-The old code relied on intercepting UIApplication.sendAction and temporarily
-changing UITextView.text. That did not reliably run before Filza's native
-saveClicked: method parsed XML and tried to save it. The view therefore sent
-inline JSON directly inside <data> to NSPropertyListSerialization, which is
-not valid plist XML, resulting in the system "data is not in the correct
-format" error.
+A document session contains two representations:
 
-Native Mach-O inspection of Filza confirms saveClicked: gets textEditor.text,
-parses plist with propertyListWithData:options:format:error:, and uses the
-native property list serializer before writing to the original path.
+1. **Source snapshot**: the exact XML/JSON text loaded by Filza and all
+   original Base64 strings/NSData representations. This is never rewritten
+   just to make a value readable.
+2. **Readable projection**: transient editor text that shows Base64 content
+   as JSON, XML plist, UTF-8, or editable hex bytes.
 
-The revised module hooks TGFastTextEditViewController.saveClicked: DIRECTLY,
-validates and re-encodes every modified <data> block, then temporarily
-returns reconstructed XML from ICTextView.text for that native save call.
-The original save path, permissions, metadata handling, and binary output
-logic remain the responsibility of Filza.
+Every projected node is linked to its original encoding and JSON path in
+backend-only metadata, never in an extra JSON field or a visible marker.
+An unchanged node reconstructs the identical original encoded text.
 
-## Visibility and syntax
+The native Save handler receives **reconstructed source text**, never the
+synthetic readable projection. Only a decoded value the user changed is
+re-encoded; the other encoded values remain their original strings/bytes.
+For a nested edit, the edited node and **only its necessary containing
+Base64 layers** must be rebuilt, from the innermost value outward.
 
-- Retains the original ICTextView and HCodeAttributedString text storage.
-- Replaces projected content through NSTextStorage.beginEditing/replace/
-  endEditing and requests the original highlighter to repaint it.
-- Maintains the existing line numbers, navigation, search bar and Save UI.
-- Indents only the DISPLAY version of XML/JSON/HEX nested payloads; added
-  spacing is removed when re-encoding changed blocks.
-- All valid opaque Base64 values in plist strings of length >=16 are now
-  shown as HEX, including 16-byte binary identifiers.
-- Does not claim opaque bytes are plaintext, nor interpret encrypted data.
-- Labels gabp.* blocks as "WhatsApp ABProps" with their actual entry count;
-  the labels are display-only XML comments and numeric IDs are not renamed.
+## Supported formats
 
-## Recursive formats
+- XML plist `<data>` contents and Base64 stored in plist `<string>` values.
+- Nested XML/binary plists recursively, preserving the original inner plist
+  format (binary remains `bplist00` on write).
+- JSON arrays and objects stored inside Base64 NSData/string values; nested
+  Base64 JSON string fields are decoded recursively.
+- Standalone JSON documents opened in Filza's text editor.
+- Base64 and Base64URL with or without `=` padding; original alphabet,
+  padding preference, and line wrapping are kept when modifying a value.
+- Printable UTF-8 content; otherwise the decoded bytes are shown in editable
+  HEX notation instead of being mislabeled as text.
+- Ordinary non-encoded values continue to be editable as usual.
 
-- XML and binary plist recursively nested in NSData/Base64.
-- JSON, including Base64-containing string values inside JSON objects/arrays.
-- UTF-8 text and raw bytes as HEX.
-- For Base64 hidden in JSON, the text editor displays only the decoded
-  JSON, readable UTF-8, XML or HEX value. The original Base64, encoding
-  kind and JSON path are held in a backend-only map attached to the
-  document, never shown as marker properties in the editor.
-- When an edited JSON value is saved, its exact JSON path and original
-  encoding determine which layers must be reconstructed. Unedited values
-  return their original encoded bytes, unchanged.
-- Binary plist inside a JSON Base64 string is presented as editable XML
-  (as a JSON string), when Foundation can encode its types; otherwise HEX.
-- Unchanged payloads keep their exact original encoded bytes and wrapping.
-- A changed payload is fully validated, then reserialized in its original
-  plist/JSON/raw format; its containing Base64 is rebuilt from inside out.
-- Unsupported proprietary, compressed, or encrypted carriers remain HEX
-  without falsely representing their semantics.
+**Plain words can also happen to be valid Base64 syntax.** Decoding every
+4-character word would corrupt the UI (for example, ordinary identifiers and
+names). The editor checks canonical encoding and uses structure/printability
+and Base64 transport features to avoid false positives. An undecidable short
+unmarked value remains unchanged rather than being converted speculatively.
+Opaque/compressed/encrypted data cannot necessarily be rendered as meaningful
+JSON or plist; unknown bytes use HEX. Very large documents and deeply nested
+records are bounded to prevent exhausting the iPhone's memory.
 
-## Safeguards
+## Minimal write behavior
 
-- Editing invalid embedded JSON/XML or HEX blocks prevents Save and reports
-  an error rather than writing the invalid representation.
-- Edited XML/plist roots must pass NSPropertyListSerialization before Save.
-- The stock native Filza save method still determines the outer format
-  (XML/binary), handles original file write privileges and shows write errors.
-- The module does not alter sandbox, app-group, or filesystem privileges.
+- **No edits:** returns the original document, byte-identical.
+- **One edited XML Base64 leaf:** restores only that body from the original
+  XML source, retaining surrounding tags, whitespace, unrelated Base64
+  strings and line endings.
+- **One edited JSON leaf:** indexes the original JSON scalar ranges, replaces
+  only modified values, and validates that parsing yields the edited structure.
+  Unmodified formatting, order and unrelated Base64 strings are unchanged.
+- **Changed JSON object/array shape:** only that JSON carrier may need full
+  JSON serialization; the outer encoded-document tree is still selective.
+- **Ambiguous original JSON/invalid edited XML, JSON or HEX:** refuses Save and
+  displays an error; does not silently write a partially decoded document.
+- **Original outer binary plist:** Filza's own `loadText` transforms it into
+  XML for text editing and its original native Save decides the binary output
+  format. The reversible codec operates on that XML view.
 
-## Tests
+A direct inspection of the original Filza 4.0 Mach-O confirms the relevant
+`loadText` call path uses `propertyListWithData:` and
+`dataWithPropertyList:format:` before calling `ICTextView.setText:`.
+`saveClicked:` reads the text view, validates/parses the resulting data,
+and writes through Filza's existing privileged file service. This patch
+does not hook that service.
 
-The same source file can be compiled in a Foundation-only codec test mode.
-The iOS 27 GitHub Actions workflow runs tests/FilzaInlineCodecTests.m before
-the full Theos build. It uses ONLY SYNTHETIC DATA (no private WhatsApp
-files). The tests verify 6,916 numeric parameter values, nested JSON and
-Base64, 16-byte HEX, a no-edit byte-preserving reconstruction, edits across
-formats, preservation of unchanged binary children, and invalid JSON
-rejection. iPhone runtime behavior and native colors/save results still
-require a device test; a successful CI build does not prove UI behavior.
+## Regression tests
 
-## Upstream prior art
+`tests/FilzaInlineCodecTests.m` exercises the same Foundation-only source
+used by the iOS editor. Scenarios include 6,916 numeric synthetic ABProps
+entries, original binary plist data, nested JSON/Base64/HEX edits, Base64URL,
+untouched sibling values, a byte-identical no-op, JSON scalar-only source
+rewrites and malformed input refusal. The Xcode 27 Actions workflow runs
+these tests before Theos compilation and packaging.
 
-The embedded detection strategy is aligned with the concepts demonstrated
-by MIT-licensed Plist-Parser (mb4n6/Plist-Parser) and plb (brunerd/plb);
-the Filza integration is written with native Apple Foundation/UIKit to
-avoid Python/shell runtimes and keep the existing editor.
-No source code was copied from those repositories.
+## Research and implementation choice
+
+- [Apple PropertyListSerialization](https://developer.apple.com/documentation/foundation/propertylistserialization)
+  reliably validates XML/binary plists and preserves semantic values, but
+  reserialization alone does **not** preserve original layout.
+- [libimobiledevice/libplist](https://github.com/libimobiledevice/libplist)
+  is a capable XML/binary plist parser/converter but converts whole documents
+  rather than providing this editor's selective byte-preserving overlay.
+- [json-zig](https://github.com/sakakibara/json-zig) demonstrates a lossless
+  source-token model. This implementation uses native Foundation with a
+  range-based JSON scalar editor, avoiding bundling a Zig runtime into iOS.
+
+No third-party parser code has been copied; this is a native Objective-C
+integration with the stock Filza editor. A successful CI build proves
+compilation and codec tests, **not** visual correctness on a physical iPhone.

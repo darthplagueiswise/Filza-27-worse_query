@@ -57,8 +57,8 @@ int main(int argc, const char *argv[]) {
             encoding:NSUTF8StringEncoding];
         FZIProjection *projection = FZIMakeProjection(source);
         FZIRequire(projection != nil, @"inline projection must be reversible");
-        FZIRequire([projection.display containsString:@"WhatsApp ABProps"],
-            @"ABProps block must have a searchable category label");
+        FZIRequire([projection.display rangeOfString:@"<!-- WhatsApp ABProps"].location == NSNotFound,
+            @"the generic codec must not inject application-specific XML comments");
         FZIRequire([projection.display containsString:@"<key>1004</key>"],
             @"all 6,916 numeric ABProps values must be visible");
         FZIRequire([projection.display containsString:@"\"nested\" : {"],
@@ -193,6 +193,8 @@ int main(int argc, const char *argv[]) {
         NSString *savedURL=urlOutput[@"url"];
         FZIRequire([savedURL containsString:@"_"] || [savedURL containsString:@"-"],
             @"Base64URL alphabet must be preserved");
+        FZIRequire([savedURL rangeOfString:@"="].location==NSNotFound,
+            @"unmodified Base64URL padding style must be retained");
 
         // Unchanged unrelated XML <data> payload must retain its exact bytes
         // and original Base64 line wrapping, even when another field is edited.
@@ -210,6 +212,43 @@ int main(int argc, const char *argv[]) {
             @"unchanged Base64 bytes and line wrapping must not be rewritten");
         FZIRequire([wrappedRestored containsString:@"SGVsbG8gV29ybGQh"]==NO,
             @"changed Base64 field must be updated");
+
+        // A JSON object packed into XML <data> is edited from the same
+        // readable projection. Its original JSON spacing and untouched
+        // sibling tokens are preserved before the outer Base64 is rebuilt.
+        NSString *originalNestedJSON=@"{ \"first\" : 1, \"payload\" : \"SGVsbG8=\", \"other\" : \"AQID\" }\n";
+        NSString *nestedCarrier=[NSString stringWithFormat:
+            @"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>"
+             "<key>nested</key><data>%@</data></dict></plist>",
+            [[originalNestedJSON dataUsingEncoding:NSUTF8StringEncoding]
+                base64EncodedStringWithOptions:0]];
+        FZIProjection *nestedProjection=FZIMakeProjection(nestedCarrier);
+        FZIRequire(nestedProjection!=nil &&
+                   [nestedProjection.display containsString:@"Hello"],
+                   @"JSON nested in XML Base64 must decode for editing");
+        NSString *nestedEdited=[nestedProjection.display
+            stringByReplacingOccurrencesOfString:@"Hello" withString:@"Filza"];
+        NSError *nestedErr=nil;
+        NSString *nestedResult=FZIValidateAndRestore(nestedProjection,
+            nestedEdited,&nestedErr);
+        FZIRequire(nestedResult!=nil,
+            nestedErr.localizedDescription ?: @"rebuild nested data JSON");
+        NSDictionary *nestedPlist=FZIReadPlist(
+            [nestedResult dataUsingEncoding:NSUTF8StringEncoding]);
+        NSString *savedJSON=[[NSString alloc] initWithData:nestedPlist[@"nested"]
+                                                 encoding:NSUTF8StringEncoding];
+        FZIRequire([savedJSON hasPrefix:@"{ \"first\" : 1, \"payload\" : \""],
+                   @"original embedded JSON prefix must be preserved");
+        FZIRequire([savedJSON hasSuffix:@"\", \"other\" : \"AQID\" }\n"],
+                   @"untouched embedded Base64 sibling and JSON whitespace must remain");
+        NSDictionary *nestedDictionary=[NSJSONSerialization JSONObjectWithData:
+            nestedPlist[@"nested"] options:0 error:nil];
+        NSString *changedInner=[[NSString alloc] initWithData:
+            [[NSData alloc] initWithBase64EncodedString:nestedDictionary[@"payload"]
+                                              options:0] encoding:NSUTF8StringEncoding];
+        FZIRequire([changedInner isEqualToString:@"Filza"],
+                   @"edited Base64 inside XML data JSON was not re-encoded");
+
         NSLog(@"[PASS] native inline codec: 6916 ABProps, nested JSON/Base64, "
               @"short HEX, valid edits, byte-preserving no-op, malformed JSON");
     }

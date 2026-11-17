@@ -235,8 +235,8 @@ static NSString *FZIRewrap64(NSData *data, NSString *original) {
     return wrapped;
 }
 
-// Scan only primitive plist tags. The outermost spans remain stable even
-// while their projected binary plist contains nested <string>/<data> tags.
+// Locate primitive XML value nodes. Only their display bodies are virtual;
+// original bytes remain in FZIProjection until the corresponding value changes.
 static NSArray<FZISpan *> *FZISpans(NSString *source, NSError **error) {
     static NSRegularExpression *regex;
     static dispatch_once_t once;
@@ -360,9 +360,11 @@ static BOOL FZIJSONIndexValues(NSString *text, NSUInteger *pos, NSString *path,
         if (*pos<text.length && [text characterAtIndex:*pos]=='}') {
             (*pos)++; return YES;
         }
+        NSMutableSet<NSString *> *seenKeys=[NSMutableSet set];
         while (*pos<text.length) {
             NSString *key=FZIJSONReadQuoted(text,pos,NULL);
-            if (!key) return NO;
+            if (!key || [seenKeys containsObject:key]) return NO;
+            [seenKeys addObject:key];
             FZIJSONSkipSpace(text,pos);
             if (*pos>=text.length || [text characterAtIndex:*pos]!=':') return NO;
             (*pos)++;
@@ -467,6 +469,13 @@ static NSString *FZIJSONRestoreSelective(NSString *original,id changed,
     BOOL indexed=FZIJSONIndexValues(original,&cursor,@"",ranges,0);
     FZIJSONSkipSpace(original,&cursor);
     indexed=indexed && cursor==original.length;
+    if (!indexed) {
+        // Never canonicalize an ambiguous JSON document (duplicate keys,
+        // unsupported lexical layout, etc.) and silently drop original data.
+        if (error) *error=FZIError(
+            @"Original JSON contains ambiguous members; only its unchanged bytes can be saved.");
+        return nil;
+    }
     NSMutableArray<NSDictionary *> *changes=[NSMutableArray array];
     if (indexed && FZIJSONChangedLeaves(originalTree,changed,@"",
         ranges,changes,0)) {
@@ -751,37 +760,6 @@ static NSString *FZIProjectXML(NSString *source,
                         value=FZIProjectDecodedData(decoded,block,depth+1);
                         // Display opaque Base64 as editable HEX too. Short values
                         // (e.g. 16-byte identifiers) must not be silently hidden.
-                    }
-                }
-            }
-        }
-        // The WhatsApp ABProps cache uses gabp.* keys whose inner entries
-        // are indexed by numeric IDs. Give those entries a discoverable,
-        // display-only label without renaming keys or changing on-disk data.
-        if (value && depth == 0 && [span.tag isEqualToString:@"data"] &&
-            (block.encoding == FZIEncodingPlistBinary ||
-             block.encoding == FZIEncodingPlistXML)) {
-            NSRange prefix = NSMakeRange(0, span.opening.location);
-            NSRange endKey = [source rangeOfString:@"</key>"
-                options:NSBackwardsSearch range:prefix];
-            if (endKey.location != NSNotFound) {
-                NSRange startKey = [source rangeOfString:@"<key>"
-                    options:NSBackwardsSearch
-                    range:NSMakeRange(0, endKey.location)];
-                if (startKey.location != NSNotFound &&
-                    endKey.location >= NSMaxRange(startKey)) {
-                    NSString *name = [source substringWithRange:NSMakeRange(
-                        NSMaxRange(startKey),
-                        endKey.location - NSMaxRange(startKey))];
-                    if ([name hasPrefix:@"gabp."]) {
-                        id decodedPlist = [NSPropertyListSerialization
-                            propertyListWithData:block.originalBytes
-                            options:0 format:NULL error:nil];
-                        NSUInteger count = [decodedPlist isKindOfClass:
-                            NSDictionary.class] ? [decodedPlist count] : 0;
-                        value = [NSString stringWithFormat:
-                            @"<!-- WhatsApp ABProps (gabp), %lu entries with numeric IDs -->\n%@",
-                            (unsigned long)count, value];
                     }
                 }
             }
