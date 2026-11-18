@@ -126,8 +126,9 @@
     // Reject JSON edits that would not roundtrip through the exact same
     // record model. This also avoids accepting truncated/corrupt buffers.
     NSDictionary *again = FPBDecode(rebuilt, YES, &error);
-    if (!again) {
-        [self fpbShowError:@"Reconstrução rejeitada" detail:error.localizedDescription ?: @"O binário não é reversível."];
+    if (!again || (!!again[@"records"] != !!doc[@"records"])) {
+        [self fpbShowError:@"Reconstrução rejeitada"
+                  detail:error.localizedDescription ?: @"A recompilação alterou o esquema dos registros."];
         return;
     }
     if (![doc[@"records"] isKindOfClass:NSArray.class] &&
@@ -194,7 +195,7 @@ static NSString *FPBSelectedFilePath(id controller, NSIndexPath *indexPath) {
 }
 static BOOL FPBIsCandidate(NSString *path) {
     NSString *ext = path.pathExtension.lowercaseString;
-    return [@[@"pb", @"pbf", @"proto", @"protobuf", @"protobin"] containsObject:ext];
+    return [@[@"pb", @"pbf", @"protobuf", @"protobin"] containsObject:ext];
 }
 static void FPBSelectFile(id self, SEL cmd, id browser, NSIndexPath *indexPath) {
     NSString *path = FPBSelectedFilePath(self, indexPath);
@@ -204,7 +205,7 @@ static void FPBSelectFile(id self, SEL cmd, id browser, NSIndexPath *indexPath) 
         BOOL isRegular = [attributes[NSFileType] isEqualToString:NSFileTypeRegular];
         NSUInteger size = [attributes[NSFileSize] unsignedIntegerValue];
         if (isRegular && size > 0 && size <= 8 * 1024 * 1024) {
-            NSData *bytes = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:&error];
+            NSData *bytes = [NSData dataWithContentsOfFile:path options:0 error:&error];
             if (bytes.length == size) {
                 NSDictionary *document = FPBDecode(bytes, FPBIsCandidate(path), &error);
                 if (document) {
