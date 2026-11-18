@@ -45,7 +45,7 @@
         target:self action:@selector(fpbSave)];
     self.navigationItem.rightBarButtonItem.enabled = NO;
     self.navigationItem.hidesBackButton = YES;
-    self.isModalInPresentation = YES;
+    self.modalInPresentation = YES;
 
     UITextView *editor = [[UITextView alloc] initWithFrame:CGRectZero];
     editor.translatesAutoresizingMaskIntoConstraints = NO;
