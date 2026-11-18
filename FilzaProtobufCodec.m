@@ -323,6 +323,9 @@ static NSData *FPBEncodeGeneric(NSDictionary *doc, NSError **error) {
         if (!FPBNumber(entry[@"field"], &field) || !FPBNumber(entry[@"wire"], &wireValue)) {
             FPBFail(error, @"Invalid field number or wire type"); return nil;
         }
+        if (wireValue > UINT32_MAX) {
+            FPBFail(error, @"Wire type exceeds uint32"); return nil;
+        }
         uint32_t wire = (uint32_t)wireValue;
         NSString *encoding = entry[@"encoding"];
         NSString *value = entry[@"value"];
