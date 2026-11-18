@@ -1,0 +1,37 @@
+name: Verify Protobuf editor
+
+on:
+  push:
+    branches:
+      - feature/protobuf-lossless-editor
+  pull_request:
+    paths:
+      - FilzaProtobufCodec.h
+      - FilzaProtobufCodec.m
+      - FilzaProtobufEditor.m
+      - tests/FilzaProtobufCodecTests.m
+      - Makefile
+      - .github/workflows/verify-protobuf-editor.yml
+  workflow_dispatch:
+
+jobs:
+  codec:
+    runs-on: macos-26-intel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and run real Objective-C codec tests (macOS)
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -fobjc-arc -fmodules -I. -framework Foundation -framework CoreFoundation \
+            FilzaProtobufCodec.m tests/FilzaProtobufCodecTests.m -o /tmp/filza-protobuf-tests
+          /tmp/filza-protobuf-tests
+      - name: Type-check iOS editor and codec against installed iPhoneOS SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          echo "iOS SDK: $SDK"
+          xcrun --sdk iphoneos clang -fobjc-arc -fmodules \
+            -target arm64-apple-ios17.0 -isysroot "$SDK" -I. \
+            -fsyntax-only FilzaProtobufCodec.m FilzaProtobufEditor.m
